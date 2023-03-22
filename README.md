@@ -149,6 +149,7 @@ rakshasa -password 123456
 
 QQ: 2252233695
 
-WeChat/微信
+WeChat/微信: Mob20045
 
-![image](https://user-images.githubusercontent.com/128351726/226795205-df2a2225-8147-4d9a-a50b-de255456f589.png)
+
+![微信图片_20230322105122](https://user-images.githubusercontent.com/128351726/226795802-9f7dba6d-38cd-4bbf-8a98-9ebb40b56efa.png)
