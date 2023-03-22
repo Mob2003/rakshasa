@@ -37,6 +37,10 @@ set GOOS=linux
 go build
 ```
 
+## 使用图示
+![image](https://user-images.githubusercontent.com/128351726/226882870-f4f3cbc0-61df-486c-afc0-511d87586402.png)
+
+
 ## 使用方法
 
 
