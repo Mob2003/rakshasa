@@ -1,0 +1,8 @@
+dstnode:
+    #- 192.168.1.180:8883
+password: ""
+port: 8884
+listenip:
+    - 192.168.1.151
+limit: false
+filename: config.yaml
