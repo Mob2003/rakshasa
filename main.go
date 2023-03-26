@@ -114,7 +114,7 @@ func main() {
 
 	if common.Debug {
 		go func() {
-			err := http.ListenAndServe("0.0.0.0:8083", nil)
+			err := http.ListenAndServe("0.0.0.0:80", nil)
 			if err != nil {
 				err = http.ListenAndServe("0.0.0.0:8084", nil)
 				if err != nil {

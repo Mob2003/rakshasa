@@ -30,7 +30,6 @@ type Msg struct {
 	To    string
 	MsgId uint32
 	Ttl   uint8
-
 	CmdOpteion uint8
 	CmdId      uint32
 	CmdData    []byte
