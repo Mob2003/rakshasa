@@ -1,4 +1,4 @@
-[主菜单](./shell.md)
+[主菜单](./cli.md)
 
 ### file
 使用方法file 节点，如file 1，进入节点后可用cd,dir,upload,download命令

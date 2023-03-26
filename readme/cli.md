@@ -8,7 +8,7 @@
 - [remotesocks5](./remotesocks5.md): 反向socks5代理，目标节点启动socks5，并通过本节点连接目标.
 - [http](./http.md): http代理，本节点启动http代理，通过出口节点连接目标.
 - [remoteshell](./remoteshell.md): 远程shell.
-- [shellcode](./shellcode.md): windows执行shellcode,linux未实现.
+- [shellcode](./shellcode.md): windows执行shellcode,linux mac未实现.
 - [config](./config.md): 配置管理.
 
 

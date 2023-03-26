@@ -1,4 +1,4 @@
-[主菜单](./shell.md)
+[主菜单](./cli.md)
 
 ### new-remotesocks5
 
