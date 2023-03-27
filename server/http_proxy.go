@@ -199,9 +199,7 @@ func StartHttpProxyWithServer(cfg *common.Addr, n *node, id uint32, pool *httppo
 				listenId: id,
 				pool:     pool,
 			}
-
 			go handleHttpProxyLocal(s)
-
 		}
 	}()
 	return l, nil
@@ -236,6 +234,7 @@ func handleHttpProxyLocal(s *httpProxyClient) {
 			s.Close(err.Error())
 			return
 		}
+
 		data = append(data, b[:n]...)
 		//尝试读取一个http消息
 		l, _, err := parsereq(req, data)
@@ -282,11 +281,10 @@ func handleHttpProxyLocal(s *httpProxyClient) {
 					buf.WriteString("\r\n")
 				}
 				buf.WriteString("\r\n")
-
 				s.write2connect(buf.Bytes())
 				buf.Reset()
 				bufPool.Put(buf)
-				return
+
 			} else {
 				return
 			}
@@ -514,8 +512,8 @@ func parsereq(req *http1request, data []byte) (clen int, resdata []byte, err err
 			err = fmt.Errorf("%+v", e)
 			debug.PrintStack()
 		}
-
 	}()
+
 
 	// method, path, proto line
 

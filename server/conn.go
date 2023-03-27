@@ -348,6 +348,7 @@ func (conn *serverConnect) doConnectTcpWithHttpProxy(network common.NetWork, add
 						conn.Close("读取http代理结果失败")
 						return
 					}
+
 					resdata = append(resdata, result[:n]...)
 					l, _, err := parsereq(req, resdata)
 					if err != nil {
