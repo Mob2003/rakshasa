@@ -7,9 +7,10 @@ rakshasa是一个使用Go语言编写的强大多级代理工具，专为实现*
 
 节点之间使用内置证书的TLS加密TCP通讯，再叠加一层自定义秘钥的AES加密，可以在所有Go支持的平台使用。可以在你所有的的Windows和Linux服务器上搭建节点并组成节点群网络。
 
-## 项目结构示例和截图
+## 更多使用方法和截图
 [点击查看更多介绍](./readme/rakshasa项目设计.md)
 
+[内网穿透--win10+Proxifier使用案例](./readme/rakshasa内网穿透--win10%2BProxifier使用案例.md)
 
 
 ## 编译与使用
