@@ -133,24 +133,23 @@ func init() {
 			currentConfig.Port = port
 			currentNode.port = port
 			currentConfig.FileSave = false
-			currentNode.broadcastNode()
-			StartServer(port)
+			StartServer(fmt.Sprintf("%s:%d",currentConfig.ListenIp,currentConfig.Port))
 		},
 	})
 
 	configShell.AddCmd(&ishell.Cmd{
 		Name: "ip",
-		Help: "修改本节点连接ip，当其他节点进行额外连接时候，优先使用此ip连接, 多个ip以,隔开",
+		Help: "修改本节点连接ip，当其他节点进行额外连接时候，优先使用此ip连接",
 		Func: func(c *ishell.Context) {
 			if len(c.Args) != 1 {
 				c.Println("参数错误")
 				return
 			}
 
-			currentConfig.ListenIp = strings.Split(c.Args[0], ",")
+			currentConfig.ListenIp = c.Args[0]
 			currentNode.mainIp = currentConfig.ListenIp
 			currentConfig.FileSave = false
-			currentNode.broadcastNode()
+
 		},
 	})
 	configShell.AddCmd(&ishell.Cmd{
@@ -752,13 +751,7 @@ func printNodes(c *ishell.Context) {
 			copy(ip, n.addr+":"+strconv.Itoa(n.port))
 		}
 
-		var s []string
-		for _, ip := range n.mainIp {
-			if ip != "" {
-				s = append(s, ip+":"+strconv.Itoa(n.port))
-			}
-		}
-		listenip := strings.Join(s, ",")
+		listenip := n.mainIp
 		goos := bytes.Repeat([]byte(" "), 11)
 		copy(goos, n.goos)
 		c.Printf("%2d  %s  %s  %s  %s  %s\n", n.id, n.uuid, hostname, goos, ip, listenip)

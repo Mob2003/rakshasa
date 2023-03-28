@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	uuid2 "github.com/google/uuid"
 	"io"
 	"io/ioutil"
 	"math/rand"
@@ -15,12 +14,15 @@ import (
 	"rakshasa/cert"
 	"rakshasa/common"
 	"runtime"
+	"runtime/debug"
 	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 	"unsafe"
+
+	uuid2 "github.com/google/uuid"
 )
 
 var (
@@ -141,21 +143,18 @@ func nodeTickPing() {
 	now := time.Now().Unix()
 	for _, n := range nodeMap {
 		if n.uuid != currentNode.uuid {
-			for _, ip := range n.mainIp {
-				if ip != "" {
-					addr1 := fmt.Sprintf("%s:%d", ip, n.port)
-					find := false
-					for _, addr2 := range extNodeIp {
-						if addr1 == addr2 {
-							find = true
-							break
-						}
-					}
-					if !find {
-						extNodeIp = append(extNodeIp, addr1)
+			if n.mainIp != "" {
+				addr1 := fmt.Sprintf("%s:%d", n.mainIp, n.port)
+				find := false
+				for _, addr2 := range extNodeIp {
+					if addr1 == addr2 {
+						find = true
+						break
 					}
 				}
-
+				if !find {
+					extNodeIp = append(extNodeIp, addr1)
+				}
 			}
 			if n.nextPingTime == 0 {
 				go n.ping(0)
@@ -185,7 +184,7 @@ type node struct {
 	queryMap           sync.Map
 	conn               *Conn
 	pingTime, pongTime int64
-	mainIp             []string
+	mainIp             string
 	port               int
 	listen             net.Listener
 	nextPingTime       int64
@@ -193,32 +192,70 @@ type node struct {
 	waitMsg    []*common.Msg //需要等待处理的消息
 	mirrorNode *node         //currentNode会生成一个互为mirror的node，以实现client-server功能，比如httpProxy在单节点启动
 }
-type nodeMsg struct {
+type nodeInfo struct {
 	UUID     string
 	HostName string
-	Addr     string
-	MainIp   []string
+	MainIp   string
 	Port     int
 	Goos     string
 }
 
 func connectNew(addr string) (n *node, e error) {
+	//先从已连接查找
+	for _, node := range nodeMap {
+		if fmt.Sprintf("%s:%d", node.mainIp, node.port) == addr {
+			return node, nil
+		} else if fmt.Sprintf("%s:%d", node.addr, node.port) == addr {
+			return node, nil
+		} else if node.uuid == addr {
+			return node, nil
+		}
+	}
 	config := cert.Tlsconfig.Clone()
-
-	conn, err := tls.Dial("tcp", addr, config)
+	interfaces, err := net.Interfaces()
+	if err != nil {
+		return nil, fmt.Errorf("无法获得网卡信息%v", err)
+	}
+	var connChan = make(chan *tls.Conn, 1)
+	raddr, err := net.ResolveTCPAddr("tcp", addr)
 	if err != nil {
 		return nil, err
 	}
-
+	for _, i := range interfaces {
+		addrs, e := i.Addrs()
+		if e == nil {
+			for _, localAddr := range addrs {
+				go func() {
+					localstr := localAddr.String()
+					localstr = localstr[:strings.LastIndex(localstr, "/")] + ":0"
+					laddr, _ := net.ResolveTCPAddr("tcp", localstr)
+					if netconn, e := net.DialTCP("tcp", laddr, raddr); e == nil {
+						conn := tls.Client(netconn, config)
+						select {
+						case connChan <- conn:
+						default:
+						}
+					}
+				}()
+			}
+		}
+	}
+	var conn *tls.Conn
+	select {
+	case c := <-connChan:
+		conn = c
+	case <-time.After(common.CMD_TIMEOUT):
+		return nil, fmt.Errorf("无法连接%s", addr)
+	}
 	c := &Conn{nodeConn: conn, isClient: true, nodeaddr: addr, remoteAddr: conn.LocalAddr().String()}
 	connMap.Store(c.remoteAddr, conn)
 	c.regResult = make(chan error, 1)
 	c.regResultNode = make(chan *node, 1)
 	c.handle()
 	c.reg()
+
 	defer func() {
 		if c.node != nil {
-
 			l := clientLock.Lock()
 			find := false
 			for _, n := range upLevelNode {
@@ -231,22 +268,6 @@ func connectNew(addr string) (n *node, e error) {
 			}
 
 			l.Unlock()
-
-			resChan := make(chan interface{}, 1)
-			id := c.node.storeQuery(resChan)
-
-			c.node.Write(common.CMD_GET_NODE, id, []byte{0})
-
-			select {
-			case <-resChan:
-				c.node.deleteQuery(id)
-				c.node.broadcastNode()
-			case <-time.After(common.CMD_TIMEOUT):
-				c.node.deleteQuery(id)
-				c.node.Close("")
-				e = errors.New("time out")
-			}
-
 		}
 	}()
 	select {
@@ -268,11 +289,19 @@ func (n *node) Write(option uint8, id uint32, b []byte) {
 		CmdId:      id,
 		CmdData:    b,
 	}
+
 	if n.uuid == currentNode.uuid {
 		n.mirrorNode.do(&msg)
 	} else {
+		b := msg.Marshal()
+		if common.Debug {
+			fmt.Println("write", msg.From, msg.To, common.CmdToName[msg.CmdOpteion], len(b))
+		}
+		if len(b) == 195 {
+			debug.PrintStack()
+		}
 		if n.conn != nil {
-			n.conn.OutChan <- msg.Marshal()
+			n.conn.OutChan <- b
 		} else {
 			upNodeWrite <- msg.Marshal()
 		}
@@ -280,6 +309,7 @@ func (n *node) Write(option uint8, id uint32, b []byte) {
 
 }
 func (n *node) WriteMsg(msg *common.Msg) {
+
 	if n.conn != nil {
 		n.conn.OutChan <- msg.Marshal()
 	} else {
@@ -402,14 +432,15 @@ func (n *node) do(msg *common.Msg) {
 				return
 			}
 
-			n.addr = regmsg.Addr
 			n.hostName = regmsg.Hostname
 			n.mainIp = regmsg.MainIp
 			n.port = regmsg.Port
 			n.goos = regmsg.Goos
-
+			n.addr = n.conn.nodeConn.RemoteAddr().String()
+			if i := strings.Index(n.addr, ":"); i > -1 {
+				n.addr = n.addr[:i]
+			}
 			resultMsg := regmsg
-			resultMsg.Addr = currentNode.addr
 			resultMsg.UUID = currentNode.uuid
 			resultMsg.Hostname = currentNode.hostName
 			resultMsg.MainIp = currentNode.mainIp
@@ -423,10 +454,13 @@ func (n *node) do(msg *common.Msg) {
 			n.uuid = uuid
 			if v, ok := nodeMap[uuid]; !ok || v.conn.closeTag > 0 {
 				n.conn.node = n
+				if common.Debug {
+					fmt.Printf("nodeMap2 %s %p \r\n", regmsg.UUID, n)
+				}
 				nodeMap[regmsg.UUID] = n
-				n.broadcastNode()
-			}
 
+			}
+			currentNode.broadcastNode()
 		}()
 	case common.CMD_REG_RESULT:
 		var regmsg common.RegMsg
@@ -453,10 +487,12 @@ func (n *node) do(msg *common.Msg) {
 		l := clientLock.Lock()
 
 		n.uuid = regmsg.UUID
-		n.addr = regmsg.Addr
 		n.hostName = regmsg.Hostname
 		n.goos = regmsg.Goos
-
+		n.addr = n.conn.nodeConn.RemoteAddr().String()
+		if i := strings.Index(n.addr, ":"); i > -1 {
+			n.addr = n.addr[:i]
+		}
 		workconn := n.conn
 		n.mainIp = regmsg.MainIp
 		n.port = regmsg.Port
@@ -475,6 +511,9 @@ func (n *node) do(msg *common.Msg) {
 		} else {
 			n.conn.node = n
 		}
+		if common.Debug {
+			fmt.Printf("nodeMap3 %s %p \r\n", n.uuid, n)
+		}
 		nodeMap[n.uuid] = n
 		l.Unlock()
 
@@ -485,7 +524,7 @@ func (n *node) do(msg *common.Msg) {
 		}
 
 		//回复节点
-		n.writeGetNodeResult(msg.CmdId)
+		//n.writeGetNodeResult(msg.CmdId)
 
 	case common.CMD_REMOTE_REG:
 
@@ -498,16 +537,17 @@ func (n *node) do(msg *common.Msg) {
 			return
 		}
 		if err == nil {
-			var node *node
-			node, err = connectNew(regmsg.RegAddr)
+			var newNode *node
+
+			newNode, err = connectNew(regmsg.RegAddr)
 			if err == nil {
 
-				regmsg.UUID = node.uuid
-				regmsg.Hostname = node.hostName
+				regmsg.UUID = newNode.uuid
+				regmsg.Hostname = newNode.hostName
 				regmsg.ViaUUID = currentNode.uuid
-				regmsg.MainIp = currentNode.mainIp
-				regmsg.Port = currentNode.port
-				regmsg.Goos = currentNode.goos
+				regmsg.MainIp = newNode.mainIp
+				regmsg.Port = newNode.port
+				regmsg.Goos = newNode.goos
 				b, _ := json.Marshal(regmsg)
 				n.Write(common.CMD_REMOTE_REG_RESULT, msg.CmdId, b)
 			}
@@ -517,6 +557,7 @@ func (n *node) do(msg *common.Msg) {
 			b, _ := json.Marshal(regmsg)
 			n.Write(common.CMD_REMOTE_REG_RESULT, msg.CmdId, b)
 		}
+		n.writeGetNodeResult(msg.CmdId)
 	case common.CMD_REMOTE_REG_RESULT:
 		var regmsg common.RegMsg
 		err = json.Unmarshal(msg.CmdData, &regmsg)
@@ -533,40 +574,50 @@ func (n *node) do(msg *common.Msg) {
 			return
 		}
 		l := clientLock.Lock()
-
-		n.uuid = regmsg.UUID
-		n.addr = regmsg.Addr
-		n.hostName = regmsg.Hostname
-		n.goos = regmsg.Goos
-		n.mainIp = regmsg.MainIp
-		n.port = regmsg.Port
-		if v, ok := nodeMap[regmsg.UUID]; !ok {
-			n.conn.node = n
-		} else {
-			if v.conn.node.uuid == regmsg.UUID && v.conn.closeTag == 0 {
-				n.conn.close <- "" //当前的连接关掉
-				n.conn = v.conn
-				v.mainIp = regmsg.MainIp
-				v.port = regmsg.Port
+		if n.uuid != regmsg.UUID {
+			var targetNode *node
+			if targetNode, ok = nodeMap[regmsg.UUID]; !ok {
+				targetNode = getNewNode(nodeInfo{
+					UUID:     regmsg.UUID,
+					HostName: regmsg.Hostname,
+					MainIp:   regmsg.MainIp,
+					Port:     regmsg.Port,
+					Goos:     regmsg.Goos,
+				}, n)
+				if common.Debug {
+					fmt.Printf("nodeMap4 %s %p \r\n", regmsg.UUID, n)
+				}
+				nodeMap[regmsg.UUID] = targetNode
 			} else {
-				n.conn.node = n
+				targetNode.updateNode(nodeInfo{
+					UUID:     regmsg.UUID,
+					HostName: regmsg.Hostname,
+					MainIp:   regmsg.MainIp,
+					Port:     regmsg.Port,
+					Goos:     regmsg.Goos,
+				})
 			}
-
+			v <- targetNode
+		} else {
+			v <- n
 		}
-		nodeMap[n.uuid] = n
+
 		l.Unlock()
 		//fmt.Printf("connect to %s(%s) success\n", regmsg.UUID, regmsg.RegAddr)
-		n.writeGetNodeResult(msg.CmdId)
-		n.broadcastNode()
+		//n.writeGetNodeResult(msg.CmdId)
+
 	case common.CMD_PING:
-		n.Write(common.CMD_PONG, msg.CmdId, msg.CmdData)
+		n.Write(common.CMD_PONG, msg.CmdId, append(msg.CmdData, n.conn.nodeConn.LocalAddr().String()...))
 	case common.CMD_NONE:
 
 	case common.CMD_PONG:
 		pingTime := int64(msg.CmdData[0]) | int64(msg.CmdData[1])<<8 | int64(msg.CmdData[2])<<16 | int64(msg.CmdData[3])<<24 | int64(msg.CmdData[4])<<32 | int64(msg.CmdData[5])<<40 | int64(msg.CmdData[6])<<48 | int64(msg.CmdData[7])<<56
-
 		if pingTime != n.pingTime {
 			return
+		}
+		n.addr = string(msg.CmdData[8:])
+		if i := strings.Index(n.addr, ":"); i > -1 {
+			n.addr = n.addr[:i]
 		}
 		n.pongTime = time.Now().Unix()
 		if v, ok := n.loadQuery(msg.CmdId); ok {
@@ -713,24 +764,20 @@ func (n *node) do(msg *common.Msg) {
 		l := clientLock.Lock()
 		defer l.Unlock()
 
-		var s []nodeMsg
+		var s []nodeInfo
 		err = json.Unmarshal(msg.CmdData, &s)
 		if err == nil {
 			for _, _n := range s {
 				if _n.UUID != currentNode.uuid {
 					if v, ok := nodeMap[_n.UUID]; !ok {
-						nodeMap[_n.UUID] = newNode(_n, n)
+						nodeMap[_n.UUID] = getNewNode(_n, n)
 					} else {
 						v.hostName = _n.HostName
 						v.mainIp = _n.MainIp
 						v.port = _n.Port
-						if _n.Addr != "" {
-							v.addr = _n.Addr
-						}
 					}
 
 				}
-
 			}
 		}
 		v, ok := n.loadQuery(msg.CmdId)
@@ -742,10 +789,9 @@ func (n *node) do(msg *common.Msg) {
 			}
 		}
 	case common.CMD_GET_CURRENT_NODE:
-		nmsg := nodeMsg{
+		nmsg := nodeInfo{
 			UUID:     currentNode.uuid,
 			HostName: currentNode.hostName,
-			Addr:     currentNode.addr,
 			MainIp:   currentNode.mainIp,
 			Port:     currentNode.port,
 			Goos:     currentNode.goos,
@@ -754,7 +800,7 @@ func (n *node) do(msg *common.Msg) {
 		n.Write(common.CMD_GET_CURRENT_NODE_RESULT, msg.CmdId, b)
 
 	case common.CMD_ADD_NODE:
-		var nmsg nodeMsg
+		var nmsg nodeInfo
 		err = json.Unmarshal(msg.CmdData, &nmsg)
 
 		if err != nil {
@@ -763,20 +809,26 @@ func (n *node) do(msg *common.Msg) {
 
 		l := clientLock.Lock()
 		defer l.Unlock()
-
 		if v, ok := nodeMap[nmsg.UUID]; !ok {
+			newNode := getNewNode(nmsg, n)
+			if common.Debug {
+				fmt.Printf("nodeMap5 %s %p \r\n", nmsg.UUID, newNode)
+			}
 
-			_n := newNode(nmsg, n)
-			nodeMap[nmsg.UUID] = _n
-
+			nodeMap[nmsg.UUID] = newNode
 		} else if nmsg.UUID != currentNode.uuid {
+
 			v.port = nmsg.Port
 			v.mainIp = nmsg.MainIp
 			v.hostName = nmsg.HostName
 			v.goos = nmsg.Goos
-			if nmsg.Addr != "" {
-				v.addr = nmsg.Addr
+			v.uuid = nmsg.UUID
+			if common.Debug {
+				fmt.Printf("nodeMap6 %s %p \r\n", nmsg.UUID, v)
 			}
+
+			nodeMap[nmsg.UUID] = v
+
 		}
 	case common.CMD_DIR:
 
@@ -1088,7 +1140,6 @@ func (n *node) do(msg *common.Msg) {
 }
 func (n *node) remoteReg(addr string) (newN *node, err error) {
 	regmsg := common.RegMsg{
-		Addr:    currentNode.addr,
 		RegAddr: addr,
 		UUID:    currentNode.uuid,
 		MainIp:  currentNode.mainIp,
@@ -1099,6 +1150,7 @@ func (n *node) remoteReg(addr string) (newN *node, err error) {
 	b, _ := json.Marshal(regmsg)
 	resChan := make(chan interface{}, 1)
 	id := n.storeQuery(resChan)
+
 	n.Write(common.CMD_REMOTE_REG, id, b)
 	select {
 	case i := <-resChan:
@@ -1118,15 +1170,14 @@ func (n *node) remoteReg(addr string) (newN *node, err error) {
 }
 func (n *node) Close(reason string) {
 	if n.conn != nil && n.conn.node.uuid == n.uuid {
-		n.conn.close <- reason
+		n.conn.Close(reason)
 	}
 	n.Delete(reason)
 }
-func newNode(m nodeMsg, n *node) *node {
-	_n := &node{
+func getNewNode(m nodeInfo, n *node) *node {
+	newNode := &node{
 		uuid:     m.UUID,
 		hostName: m.HostName,
-		addr:     m.Addr,
 		conn:     n.conn,
 		pongTime: time.Now().Unix(),
 		mainIp:   m.MainIp,
@@ -1134,7 +1185,7 @@ func newNode(m nodeMsg, n *node) *node {
 		goos:     m.Goos,
 	}
 
-	return _n
+	return newNode
 }
 func allNodesDo(f func(*node) (bool, error)) (err error) {
 	var ok bool
@@ -1161,7 +1212,9 @@ func allNodesDo(f func(*node) (bool, error)) (err error) {
 	return nil
 }
 func (n *node) ping(id uint32) {
-
+	if common.NoPing {
+		return
+	}
 	l := clientLock.Lock()
 
 	defer func() {
@@ -1270,20 +1323,22 @@ func (n *node) Delete(reason string) {
 
 }
 func (n *node) broadcastNode() {
+
 	//广播新增节点
-	nmsg := nodeMsg{
+	nmsg := nodeInfo{
 		UUID:     n.uuid,
 		HostName: n.hostName,
-		Addr:     n.addr,
 		MainIp:   n.mainIp,
 		Port:     n.port,
 		Goos:     n.goos,
 	}
+
 	b, _ := json.Marshal(nmsg)
 	writemsg := &common.Msg{
-		From:    currentNode.uuid,
-		To:      common.BroadcastUUID.String(),
-		CmdData: append([]byte{common.CMD_ADD_NODE, 0, 0}, b...),
+		From:       currentNode.uuid,
+		To:         common.BroadcastUUID.String(),
+		CmdOpteion: common.CMD_ADD_NODE,
+		CmdData:    b,
 	}
 	go allNodesDo(func(_n *node) (bool, error) {
 
@@ -1293,6 +1348,7 @@ func (n *node) broadcastNode() {
 		}
 		return true, nil
 	})
+
 }
 
 func GetNodeFromAddrs(dst []string) (n *node, err error) {
@@ -1306,7 +1362,7 @@ func GetNodeFromAddrs(dst []string) (n *node, err error) {
 	for i := 1; i < len(dst); i++ {
 		n, err = n.remoteReg(dst[i])
 		if err != nil {
-			return
+			return nil, fmt.Errorf("%s,%v", dst[i], err)
 		}
 	}
 	if n == nil {
@@ -1353,19 +1409,19 @@ func (n *node) storeConn(v common.Conn) (newID uint32) {
 		}
 	}
 }
+
 func (n *node) writeGetNodeResult(id uint32) {
 	l := clientLock.RLock()
 
 	defer l.RUnlock()
 
-	var s []nodeMsg
+	var s []nodeInfo
 
 	for _, _n := range nodeMap {
 		if _n.uuid != currentNode.uuid {
-			s = append(s, nodeMsg{
+			s = append(s, nodeInfo{
 				UUID:     _n.uuid,
 				HostName: _n.hostName,
-				Addr:     _n.addr,
 				MainIp:   _n.mainIp,
 				Port:     _n.port,
 				Goos:     _n.goos,
@@ -1376,4 +1432,10 @@ func (n *node) writeGetNodeResult(id uint32) {
 
 	b, _ := json.Marshal(s)
 	n.Write(common.CMD_GET_NODE_RESULT, id, b)
+}
+func (n *node) updateNode(msg nodeInfo) {
+	n.hostName = msg.HostName
+	n.mainIp = msg.MainIp
+	n.port = msg.Port
+	n.goos = msg.Goos
 }

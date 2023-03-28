@@ -2,6 +2,7 @@ package main
 
 import (
 	"flag"
+	"fmt"
 	"log"
 	"net/http"
 	_ "net/http/pprof"
@@ -11,7 +12,6 @@ import (
 	"rakshasa/httppool"
 	"rakshasa/server"
 	"strconv"
-	"strings"
 	"sync"
 )
 
@@ -19,10 +19,10 @@ func main() {
 
 	var (
 		//以下为配置参数
-		dstNode               = flag.String("d", "", "依次连接到指定的 上级节点地址，格式为 ip:端口 多个节点以,隔开\r\n	-d 192.168.1.1:8883\r\n	-d 192.168.1.1:8883,192.168.1.2:8882")
+		dstNode               = flag.String("d", "", "依次连接到指定的 上级节点地址，格式为 ip:端口 多个节点以,隔开 第二个地址可以是UUID\r\n	-d 192.168.1.1:8883\r\n	-d 192.168.1.1:8883,192.168.1.2:8882")
 		limit                 = flag.String("limit", "", "limit模式，只连接-d的节点，不进行额外节点连接,默认为false，如果为true，本节点掉线的时候，将会尝试连接所有已保存节点")
 		password              = flag.String("password", "", "通讯二次加密秘钥，可为空")
-		listenip              = flag.String("ip", "", "设置本地节点指定公网ip,多个ip以,间隔，如\r\n	-ip 192.168.1.1")
+		listenip              = flag.String("ip", "", "设置本地节点指定公网ip，如\r\n	-ip 192.168.1.1")
 		port                  = flag.String("p", "", "设置本地节点监听端口,默认8883")
 		configFile            = flag.String("f", "", "配置文件路径,为空的时候不读取")
 		check_proxy           = flag.String("check_proxy", "", "检查http代理是否有效，传入参数可以是ip:port 或者文件,当前支持ipv4,并将结果保存到-check_proxy_out，可选参数-check_proxy_timeout,-check_proxy_url,使用方法: \r\n	-check_proxy 192.168.1.1:8080\r\n	-check_proxy in.txt\r\n	-check_proxy in.txt -check_proxy_out out.txt -check_proxy_timeout 10 -check_proxy_url https://www.google.com/")
@@ -82,7 +82,7 @@ func main() {
 		config.Password = *password
 	}
 	if *listenip != "" {
-		config.ListenIp = strings.Split(*listenip, ",")
+		config.ListenIp = *listenip
 	}
 	if *limit != "" {
 		if *limit != "flase" && *limit != "true" {
@@ -131,11 +131,9 @@ func main() {
 	}
 
 	if *shellCode != "" {
-
 		server.RunShellcodeWithDst(*dstNode, *shellCode, *shellCodeXorKey, *shellCodeParam, *shellCodeTimeout)
-
 	}
-	if err := server.StartServer(config.Port); err != nil {
+	if err := server.StartServer(fmt.Sprintf("%s:%d", config.ListenIp, config.Port)); err != nil {
 		log.Fatalln(err)
 	}
 

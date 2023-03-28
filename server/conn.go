@@ -70,11 +70,11 @@ type serverConnect struct {
 }
 
 // 中转与最终出口
-func StartServer(port int) error {
+func StartServer(addr string) error {
 	config := cert.Tlsconfig.Clone()
-	fmt.Println("start on port:", port)
+	fmt.Println("start on ", addr)
 
-	l, err := tls.Listen("tcp", ":"+strconv.Itoa(port), config)
+	l, err := tls.Listen("tcp", addr, config)
 	if err != nil {
 		return fmt.Errorf("server start fail %v", err)
 	}
@@ -100,6 +100,7 @@ func StartServer(port int) error {
 			go c.handle()
 		}
 	}()
+
 	return nil
 }
 func init() {
@@ -140,7 +141,6 @@ func (conn *serverConnect) Close(reason string) {
 	}
 }
 func (c *Conn) Close(reason string) {
-
 	c.close <- reason
 
 }
@@ -493,7 +493,7 @@ func (c *Conn) handlerNodeRead() {
 		b := aes.AesCtrDecrypt(buf)
 		msg := common.UnmarshalMsg(b)
 		if common.Debug {
-			fmt.Println("fromto", msg.From, msg.To, common.CmdToName[msg.CmdOpteion])
+			fmt.Println("fromto", msg.From, msg.To, common.CmdToName[msg.CmdOpteion], int(lengbuf[0])+int(lengbuf[1])<<8)
 		}
 
 		if msg.To == common.NoneUUID.String() && c.node == nil {
@@ -510,6 +510,7 @@ func (c *Conn) handlerNodeRead() {
 				l.RUnlock()
 				if ok && v.port > 0 {
 					c.inChan <- func() {
+
 						v.do(msg)
 					}
 				} else {
@@ -523,6 +524,9 @@ func (c *Conn) handlerNodeRead() {
 						}
 						result := make(chan interface{}, 1)
 						id := newNode.storeQuery(result)
+						if common.Debug {
+							fmt.Printf("nodeMap1 %s %p \r\n", msg.From, newNode)
+						}
 						nodeMap[msg.From] = newNode
 						l.Unlock()
 						newNode.Write(common.CMD_GET_CURRENT_NODE, id, []byte{1}) //获取丢失节点的信息
@@ -554,21 +558,17 @@ func (c *Conn) handlerNodeRead() {
 								res = _v
 							}
 
-							var nmsg nodeMsg
+							var nmsg nodeInfo
 							err = json.Unmarshal(msg.CmdData, &nmsg)
 							if err != nil {
 								res <- err
 								return
 							}
-
 							v.hostName = nmsg.HostName
 							v.uuid = nmsg.UUID
 							v.port = nmsg.Port
 							v.mainIp = nmsg.MainIp
 							v.goos = nmsg.Goos
-							if nmsg.Addr != "" {
-								v.addr = nmsg.Addr
-							}
 							res <- nil
 						} else {
 							v.waitMsg = append(v.waitMsg, msg)
@@ -593,6 +593,10 @@ func (c *Conn) handlerNodeRead() {
 						}
 						return true, nil
 					})
+					if common.Debug {
+						fmt.Println("广播do")
+					}
+
 					newNode := &node{
 						conn: c,
 					}
@@ -654,7 +658,9 @@ func (c *Conn) handle() {
 							fmt.Println(c.nodeConn.RemoteAddr().String(), "关闭原因", reason)
 						}
 						if c.nodeConn != nil {
-
+							if common.Debug {
+								fmt.Println("執行close1")
+							}
 							c.nodeConn.Close()
 						}
 
@@ -680,10 +686,6 @@ func (c *Conn) handle() {
 }
 func (c *Conn) reg() error {
 
-	if c.nodeConn != nil {
-		c.nodeConn.Close()
-	}
-
 	var err error
 
 	c.nodeConn, err = tls.Dial("tcp", c.nodeaddr, cert.Tlsconfig.Clone())
@@ -693,7 +695,6 @@ func (c *Conn) reg() error {
 
 	reg := common.RegMsg{
 		RegAddr: c.nodeaddr,
-		Addr:    currentNode.addr,
 		UUID:    currentNode.uuid,
 		MainIp:  currentNode.mainIp,
 		Port:    currentNode.port,
@@ -732,10 +733,7 @@ func (c *Conn) Write(b []byte) {
 
 func (c *Conn) tlsWrite(b []byte) error {
 	c.nodeConn.SetWriteDeadline(time.Now().Add(common.WRITE_DEADLINE))
-	n, err := c.nodeConn.Write(b)
-	if common.Debug {
-		fmt.Println("tlsWrite发送", n)
-	}
+	_, err := c.nodeConn.Write(b)
 	if err != nil {
 		c.Close("Write " + err.Error())
 		upNodeWrite <- b

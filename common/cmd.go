@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"github.com/dlclark/regexp2"
 	"github.com/google/uuid"
 	"math/rand"
 	"net"
@@ -15,6 +16,7 @@ import (
 )
 
 var Debug bool = false
+var NoPing bool = false
 var DebugLock bool = false
 var DebugLockMap sync.Map
 
@@ -194,13 +196,12 @@ func init() {
 
 type RegMsg struct {
 	UUID     string //当前机器uuid
-	Addr     string
 	RegAddr  string //远程连接的addr
 	Hostname string //当前机器名称
 	Goos     string
 	ViaUUID  string
 	Err      string
-	MainIp   []string
+	MainIp   string
 	Port     int
 }
 
@@ -310,7 +311,16 @@ func ResolveTCPAddr(str string) ([]string, error) {
 			dst = append(dst[:i], dst[i+1:]...)
 		} else {
 			if _, err := net.ResolveTCPAddr("tcp", addr); err != nil {
-				return nil, fmt.Errorf("参数错误 格式为\"ip:端口\",多个地址以逗号隔开，错误详情%v", err)
+				if i>0{
+					r, _ := regexp2.Compile(`^[a-z0-9]{8}-[a-z0-9]{4}-[a-z0-9]{4}-[a-z0-9]{4}-[a-z0-9]{12}`, 0)
+					match,_ :=r.MatchString(addr)
+					if !match{
+						return nil, fmt.Errorf("参数错误 格式为\"ip:端口\",多个地址以逗号隔开，错误详情%v", err)
+					}
+				}else{
+					return nil, fmt.Errorf("参数错误 格式为\"ip:端口,第二个地址可以是UUID\",多个地址以逗号隔开，错误详情%v", err)
+				}
+
 			}
 		}
 
