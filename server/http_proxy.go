@@ -2,12 +2,15 @@ package server
 
 import (
 	"bytes"
+	"encoding/binary"
 	"fmt"
 	"hash/crc32"
 	"log"
+	"math/rand"
 	"net"
 	"net/url"
 	"os"
+	"rakshasa/cert"
 	"rakshasa/common"
 	"rakshasa/httppool"
 	"runtime/debug"
@@ -15,6 +18,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/luyu6056/ishell"
 )
@@ -42,32 +46,34 @@ type httpProxyClient struct {
 	pool       *httppool.HttpPool
 	remoteAddr string
 	remotePort string
+	randkey    []byte
 }
 
 func (s *httpProxyClient) Write(b []byte) {
 
 	switch b[0] {
-
 	case common.CMD_CONNECT_BYIDADDR_RESULT:
-
-		switch common.NetWork(b[1]) {
+		if string(s.randkey) != string(b[1:9]) {
+			return
+		}
+		switch common.NetWork(b[9]) {
 
 		case common.RAW_TCP:
-			if b[2] != 1 {
+			if b[10] != 1 {
 				go func() { s.Close("") }()
 			} else if s.method == "CONNECT" {
 				s.conn.Write([]byte("HTTP/1.0 200 Connection established\r\n\r\n"))
 			}
 		case common.RAW_TCP_WITH_PROXY:
 
-			if b[2] != 1 {
+			if b[10] != 1 {
 				//重新拉取一个池
 				s.connect()
 			} else if s.method == "CONNECT" {
 				s.conn.Write([]byte("HTTP/1.0 200 Connection established\r\n\r\n"))
 			}
 		default:
-			log.Println("未处理")
+			log.Println("httpProxyClient 未处理")
 		}
 
 	case common.CMD_CONN_MSG:
@@ -165,7 +171,9 @@ func StartHttpProxy(cfg *common.Addr, dst []string, poolfile string) error {
 		localAddr: cfg.Addr(),
 		id:        common.GetID(),
 		typ:       "http",
+		randkey:   make([]byte, 8),
 	}
+	binary.LittleEndian.PutUint64(l.randkey, uint64(rand.NewSource(time.Now().UnixNano()).Int63()))
 	l.listen, err = StartHttpProxyWithServer(cfg, target, l.id, pool)
 	if err != nil {
 
@@ -180,7 +188,8 @@ func StartHttpProxyWithServer(cfg *common.Addr, n *node, id uint32, pool *httppo
 	if err != nil {
 		return nil, err
 	}
-
+	randkey := make([]byte, 8)
+	binary.LittleEndian.PutUint64(randkey, uint64(rand.NewSource(time.Now().UnixNano()).Int63()))
 	fmt.Println("httpproxy start ", cfg.Addr())
 	go func() {
 		for {
@@ -198,6 +207,7 @@ func StartHttpProxyWithServer(cfg *common.Addr, n *node, id uint32, pool *httppo
 				server:   n,
 				listenId: id,
 				pool:     pool,
+				randkey:  randkey,
 			}
 			go handleHttpProxyLocal(s)
 		}
@@ -354,7 +364,8 @@ func (s *httpProxyClient) connect() {
 			buf[0] = byte(common.RAW_TCP_WITH_PROXY)
 			buf = append(buf, []byte(" "+proxy.String())...)
 		}
-		s.server.Write(common.CMD_CONNECT_BYIDADDR, s.id, buf)
+
+		s.server.Write(common.CMD_CONNECT_BYIDADDR, s.id, cert.RSAEncrypterByPrivByte(append(s.randkey,buf...)))
 		if value, ok := s.server.listenMap.Load(s.listenId); ok {
 			switch v := value.(type) {
 			case *serverListen:
@@ -377,7 +388,7 @@ func (s *httpProxyClient) Remoteclose() {
 	buf[1] = byte(s.id >> 8)
 	buf[2] = byte(s.id >> 16)
 	buf[3] = byte(s.id >> 24)
-	s.server.Write(common.CMD_DELETE_LISTENCONN_BYID, s.listenId, buf)
+	s.server.Write(common.CMD_DELETE_LISTENCONN_BYID, s.listenId, append(s.randkey,buf...))
 
 }
 func init() {
@@ -454,7 +465,7 @@ func init() {
 				c.Println("没有找到ID为", id, "的连接")
 			} else {
 				l.Close("命令行关闭")
-				l.server.Write(common.CMD_DELETE_LISTEN, l.id, nil)
+				l.server.Write(common.CMD_DELETE_LISTEN, l.id, l.randkey)
 				currentNode.listenMap.Delete(uint32(id))
 
 			}
@@ -513,7 +524,6 @@ func parsereq(req *http1request, data []byte) (clen int, resdata []byte, err err
 			debug.PrintStack()
 		}
 	}()
-
 
 	// method, path, proto line
 

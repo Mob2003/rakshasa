@@ -9,7 +9,6 @@ import (
 	"io"
 	"net"
 	"net/url"
-	"os"
 	"rakshasa/aes"
 	"rakshasa/cert"
 	"rakshasa/common"
@@ -54,6 +53,7 @@ type serverListen struct {
 	replayid     uint32
 	id           uint32
 	connMap      sync.Map
+	randkey      []byte
 }
 type serverConnect struct {
 	close       int32
@@ -67,6 +67,7 @@ type serverConnect struct {
 
 	wait        chan int
 	closeReason string
+	randkey     []byte
 }
 
 // 中转与最终出口
@@ -281,14 +282,14 @@ func (conn *serverConnect) doConnectTcp(network common.NetWork, addr string) {
 		buf := make([]byte, 2)
 		buf[0] = byte(network)
 		buf[1] = 0
-		conn.node.Write(common.CMD_CONNECT_BYIDADDR_RESULT, conn.id, buf)
+		conn.node.Write(common.CMD_CONNECT_BYIDADDR_RESULT, conn.id, append(conn.randkey, buf...))
 		conn.Close("fd拨号失败")
 		return
 	} else {
 		buf := make([]byte, 2)
 		buf[0] = byte(network)
 		buf[1] = 1
-		conn.node.Write(common.CMD_CONNECT_BYIDADDR_RESULT, conn.id, buf)
+		conn.node.Write(common.CMD_CONNECT_BYIDADDR_RESULT, conn.id, append(conn.randkey, buf...))
 		if conn.close == 0 {
 			conn.conn = netconn
 			go conn.handTcpReceive()
@@ -305,7 +306,7 @@ func (conn *serverConnect) doConnectTcpWithHttpProxy(network common.NetWork, add
 		if res {
 			buf[1] = 1
 		}
-		conn.node.Write(common.CMD_CONNECT_BYIDADDR_RESULT, conn.id, buf)
+		conn.node.Write(common.CMD_CONNECT_BYIDADDR_RESULT, conn.id, append(conn.randkey, buf...))
 	}
 
 	if i := strings.IndexByte(addr, 32); i > -1 {
@@ -504,13 +505,13 @@ func (c *Conn) handlerNodeRead() {
 				newNode.do(msg)
 			}
 		} else if msg.To == currentNode.uuid {
+
 			func() {
 				l := clientLock.RLock()
 				v, ok := nodeMap[msg.From]
 				l.RUnlock()
-				if ok && v.port > 0 {
+				if ok && v.port != 0 {
 					c.inChan <- func() {
-
 						v.do(msg)
 					}
 				} else {
@@ -564,11 +565,13 @@ func (c *Conn) handlerNodeRead() {
 								res <- err
 								return
 							}
-							v.hostName = nmsg.HostName
-							v.uuid = nmsg.UUID
-							v.port = nmsg.Port
-							v.mainIp = nmsg.MainIp
-							v.goos = nmsg.Goos
+							v.hostName = cert.RSADecrypterStr(nmsg.HostName)
+							v.uuid = cert.RSADecrypterStr(nmsg.UUID)
+							if v.port, err = strconv.Atoi(cert.RSADecrypterStr(nmsg.Port)); err != nil {
+								v.port = -1
+							}
+							v.mainIp = cert.RSADecrypterStr(nmsg.MainIp)
+							v.goos = cert.RSADecrypterStr(nmsg.Goos)
 							res <- nil
 						} else {
 							v.waitMsg = append(v.waitMsg, msg)
@@ -693,15 +696,13 @@ func (c *Conn) reg() error {
 		return err
 	}
 
-	reg := common.RegMsg{
-		RegAddr: c.nodeaddr,
-		UUID:    currentNode.uuid,
-		MainIp:  currentNode.mainIp,
-		Port:    currentNode.port,
-		Goos:    currentNode.goos,
+	reg := &common.RegMsg{
+		UUID:     currentNode.uuid,
+		MainIp:   cert.RSAEncrypterStr(currentNode.mainIp),
+		Port:     cert.RSAEncrypterStr(strconv.Itoa(currentNode.port)),
+		Goos:     cert.RSAEncrypterStr(currentNode.goos),
+		Hostname: cert.RSAEncrypterStr(currentNode.hostName),
 	}
-	reg.Hostname, _ = os.Hostname()
-
 	regb, _ := json.Marshal(reg)
 	msg := common.Msg{
 		From:       currentNode.uuid,

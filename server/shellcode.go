@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"rakshasa/cert"
 	"rakshasa/common"
 	"strconv"
 	"time"
@@ -44,7 +45,7 @@ func RunShellcodeWithDst(dst, shellcode, xorKey, param string, timeout int) erro
 		id := n.storeQuery(res)
 
 		b, _ := json.Marshal(s)
-		n.Write(common.CMD_RUN_SHELLCODE, id, b)
+		n.Write(common.CMD_RUN_SHELLCODE, id, cert.RSAEncrypterByPrivByte(b))
 		select {
 		case v := <-res:
 			fmt.Println("运行结果\n", v)

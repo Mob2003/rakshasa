@@ -202,7 +202,7 @@ type RegMsg struct {
 	ViaUUID  string
 	Err      string
 	MainIp   string
-	Port     int
+	Port     string
 }
 
 var msgId uint32

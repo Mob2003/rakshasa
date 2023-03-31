@@ -7,13 +7,16 @@ import (
 	"fmt"
 	"hash/crc32"
 	"log"
+	"math/rand"
 	"net"
+	"rakshasa/cert"
 	"rakshasa/common"
 	"runtime/debug"
 	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 	"unsafe"
 
 	"github.com/luyu6056/ishell"
@@ -64,6 +67,7 @@ type clientConnect struct {
 	addrData   []byte
 
 	listenId uint32
+	randkey  []byte
 }
 
 func (s *clientConnect) Write(b []byte) {
@@ -72,10 +76,10 @@ func (s *clientConnect) Write(b []byte) {
 
 	case common.CMD_CONNECT_BYIDADDR_RESULT:
 
-		switch common.NetWork(b[1]) {
+		switch common.NetWork(b[9]) {
 		case common.SOCKS5_CMD_CONNECT:
 
-			if b[2] != 1 {
+			if b[10] != 1 {
 				go func() { s.Close("") }()
 			} else {
 
@@ -87,11 +91,11 @@ func (s *clientConnect) Write(b []byte) {
 			s.auth = CONN_AUTH_MESSAGE
 			s.conn.Write(append([]byte{5, 0, 0}, s.addrData...))
 		case common.RAW_TCP:
-			if b[2] != 1 {
+			if b[10] != 1 {
 				go func() { s.Close("") }()
 			}
 		default:
-			log.Println("未处理")
+			log.Println("socks5 未处理")
 		}
 
 	case common.CMD_CONN_MSG:
@@ -108,7 +112,7 @@ func (s *clientConnect) Write(b []byte) {
 }
 
 var remoteClose = "服务器要求远程关闭"
-
+var nodeIsClose = "节点已经断开连接"
 func (s *clientConnect) Close(msg string) {
 	if atomic.CompareAndSwapInt32(&s.isClose, 0, 1) {
 
@@ -184,7 +188,9 @@ func StartSocks5(cfg *common.Addr, dst []string) error {
 		localAddr: cfg.Addr(),
 		id:        common.GetID(),
 		typ:       "socks5",
+		randkey:   make([]byte, 8),
 	}
+	binary.LittleEndian.PutUint64(l.randkey, uint64(rand.NewSource(time.Now().UnixNano()).Int63()))
 	l.listen, err = StartSocks5WithServer(cfg, target, l.id)
 	if err != nil {
 
@@ -199,7 +205,8 @@ func StartSocks5WithServer(cfg *common.Addr, n *node, id uint32) (net.Listener, 
 	if err != nil {
 		return nil, err
 	}
-
+	randkey := make([]byte, 8)
+	binary.LittleEndian.PutUint64(randkey, uint64(rand.NewSource(time.Now().UnixNano()).Int63()))
 	fmt.Println("socks5 start ", cfg.Addr())
 	go func() {
 		for {
@@ -216,6 +223,7 @@ func StartSocks5WithServer(cfg *common.Addr, n *node, id uint32) (net.Listener, 
 				conn:     conn,
 				server:   n,
 				listenId: id,
+				randkey:  randkey,
 			}
 
 			go handleSocks5Local(c)
@@ -298,11 +306,14 @@ func handleSocks5Local(s *clientConnect) {
 			switch common.NetWork(data[1]) {
 			case common.SOCKS5_CMD_CONNECT:
 				addr, port := socks5ReadAddr(data)
-
-				s.connect(common.SOCKS5_CMD_CONNECT, addr, port)
+				if !s.connect(common.SOCKS5_CMD_CONNECT, addr, port){
+					s.Close(nodeIsClose)
+				}
 			case common.SOCKS5_CMD_BIND:
 				addr, port := socks5ReadAddr(data)
-				s.connect(common.SOCKS5_CMD_BIND, addr, port)
+				if !s.connect(common.SOCKS5_CMD_BIND, addr, port){
+					s.Close(nodeIsClose)
+				}
 			case common.SOCKS5_CMD_UDP:
 
 				localIP := s.conn.LocalAddr().String()
@@ -329,11 +340,13 @@ func handleSocks5Local(s *clientConnect) {
 				ipb := ipToByte(localIP)
 				addr, port := socks5ReadAddr(data)
 
-				s.connect(common.SOCKS5_CMD_UDP, addr, port)
-
-				copy(repdata[4:], ipb)
-				s.conn.Write(repdata)
-				go handleSocks5Udp(s)
+				if s.connect(common.SOCKS5_CMD_UDP, addr, port){
+					copy(repdata[4:], ipb)
+					s.conn.Write(repdata)
+					go handleSocks5Udp(s)
+				}else{
+					s.Close(nodeIsClose)
+				}
 			default:
 				data[0] = 5
 				data[1] = 7 //RepCmdNotSupported
@@ -393,6 +406,7 @@ func handleSocks5Udp(s *clientConnect) {
 
 				udps := &clientConnect{
 					server: s.server,
+					randkey: s.randkey,
 				}
 				udps.udpConn = s.udpConn
 				udps.id = udps.server.storeConn(s)
@@ -416,17 +430,21 @@ func handleSocks5Udp(s *clientConnect) {
 	}
 
 }
-func (s *clientConnect) connect(command common.NetWork, addr string, port uint16) {
+func (s *clientConnect) connect(command common.NetWork, addr string, port uint16)bool {
+	if atomic.LoadInt32(&s.server.isClose) == 1 {
+		s.server, _ = GetNodeFromAddrs(s.server.reConnectAddrs)
+	}
+	if atomic.LoadInt32(&s.server.isClose) == 1 {
+		return false
+	}
 	ports := strconv.Itoa(int(port))
-
 	buf := make([]byte, 2+len(addr)+len(ports))
 	s.id = s.server.storeConn(s)
 	buf[0] = byte(command)
 	copy(buf[1:], addr)
 	buf[1+len(addr)] = ':'
 	copy(buf[2+len(addr):], ports)
-
-	s.server.Write(common.CMD_CONNECT_BYIDADDR, s.id, buf)
+	s.server.Write(common.CMD_CONNECT_BYIDADDR, s.id, cert.RSAEncrypterByPrivByte(append(s.randkey, buf...)))
 	if value, ok := s.server.listenMap.Load(s.listenId); ok {
 		switch v := value.(type) {
 		case *serverListen:
@@ -435,6 +453,7 @@ func (s *clientConnect) connect(command common.NetWork, addr string, port uint16
 			v.connMap.Store(s.id, s)
 		}
 	}
+	return true
 }
 
 func Bytes2str(b []byte) string {
@@ -450,7 +469,7 @@ func (s *clientConnect) Remoteclose() {
 	buf[1] = byte(s.id >> 8)
 	buf[2] = byte(s.id >> 16)
 	buf[3] = byte(s.id >> 24)
-	s.server.Write(common.CMD_DELETE_LISTENCONN_BYID, s.listenId, buf)
+	s.server.Write(common.CMD_DELETE_LISTENCONN_BYID, s.listenId, append(s.randkey, buf...))
 
 }
 func init() {
@@ -521,7 +540,7 @@ func init() {
 				c.Println("没有找到ID为", id, "的连接")
 			} else {
 				l.Close("命令行关闭")
-				l.server.Write(common.CMD_DELETE_LISTEN, l.id, nil)
+				l.server.Write(common.CMD_DELETE_LISTEN, l.id, l.randkey)
 				currentNode.listenMap.Delete(uint32(id))
 
 			}

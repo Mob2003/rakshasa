@@ -108,7 +108,7 @@ func main() {
 	server.SetConfig(config)
 
 	//设置一下秘钥
-	aes.Key = aes.MD5_B(config.Password + string(cert.PublicKey[:16]))
+	aes.Key = aes.MD5_B(config.Password + string(cert.PrivateKey[:16]))
 	//初始化node
 	server.InitCurrentNode()
 

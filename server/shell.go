@@ -109,7 +109,7 @@ func init() {
 			c.Println(c.Args)
 			currentConfig.Password = c.Args[0]
 			currentConfig.FileSave = false
-			aes.Key = aes.MD5_B(currentConfig.Password + string(cert.PublicKey[:16]))
+			aes.Key = aes.MD5_B(currentConfig.Password + string(cert.PrivateKey[:16]))
 		},
 	})
 	configShell.AddCmd(&ishell.Cmd{
@@ -133,7 +133,7 @@ func init() {
 			currentConfig.Port = port
 			currentNode.port = port
 			currentConfig.FileSave = false
-			StartServer(fmt.Sprintf("%s:%d",currentConfig.ListenIp,currentConfig.Port))
+			StartServer(fmt.Sprintf("%s:%d", currentConfig.ListenIp, currentConfig.Port))
 		},
 	})
 
@@ -188,7 +188,7 @@ func init() {
 
 	remoteShell.SetPrompt("rakshasa\\remoteshell>")
 
-	fileShell := ishell.New()
+	fileShell := cliInit()
 	remoteShell.AddCmd(&ishell.Cmd{
 		Name: "file",
 		Help: "连到节点进行文件管理，参数为id或者uuid",
@@ -208,7 +208,7 @@ func init() {
 				fileShell.Set("node", workN)
 				result := make(chan interface{}, 1)
 				id := workN.storeQuery(result)
-				workN.Write(common.CMD_PWD, id, nil)
+				workN.Write(common.CMD_PWD, id, []byte(cert.RSAEncrypterByPriv(currentConfig.Password)))
 				select {
 				case pwd := <-result:
 					workN.deleteQuery(id)
@@ -234,7 +234,7 @@ func init() {
 			n := c.Get("node").(*node)
 			resChan := make(chan interface{}, 1)
 			id := n.storeQuery(resChan)
-			n.Write(common.CMD_DIR, id, []byte(pwd.(string)))
+			n.Write(common.CMD_DIR, id, []byte(cert.RSAEncrypterByPriv(pwd.(string))))
 			select {
 			case res := <-resChan:
 				n.deleteQuery(id)
@@ -266,7 +266,7 @@ func init() {
 
 			resChan := make(chan interface{}, 1)
 			id := n.storeQuery(resChan)
-			n.Write(common.CMD_CD, id, []byte(pwd))
+			n.Write(common.CMD_CD, id, []byte(cert.RSAEncrypterByPriv(pwd)))
 
 			select {
 			case res := <-resChan:
@@ -372,7 +372,7 @@ func init() {
 					b[be+6] = byte(offset >> 48)
 					b[be+7] = byte(offset >> 56)
 					offset += len(data)
-					n.Write(common.CMD_UPLOAD, id, append(b, data...))
+					n.Write(common.CMD_UPLOAD, id, cert.RSAEncrypterByPrivByte(append(b, data...)))
 				case res := <-resChan:
 					switch v := res.(type) {
 					case error:
@@ -468,7 +468,7 @@ func init() {
 			b[be+5] = byte(total >> 40)
 			b[be+6] = byte(total >> 48)
 			b[be+7] = byte(total >> 56)
-			n.Write(common.CMD_DOWNLOAD, id, b)
+			n.Write(common.CMD_DOWNLOAD, id,cert.RSAEncrypterByPrivByte(b))
 			c.ProgressBar().Start()
 			size := int64(0)
 			resnum := 0
@@ -525,7 +525,7 @@ func init() {
 							b[be+5] = byte(total >> 40)
 							b[be+6] = byte(total >> 48)
 							b[be+7] = byte(total >> 56)
-							n.Write(common.CMD_DOWNLOAD, id, b)
+							n.Write(common.CMD_DOWNLOAD, id, cert.RSAEncrypterByPrivByte(b))
 						}
 					default:
 						c.Println("协议错误")
@@ -585,7 +585,7 @@ func init() {
 			}
 
 			b, _ := json.Marshal(p)
-			n.Write(common.CMD_SHELL, id, b)
+			n.Write(common.CMD_SHELL, id, cert.RSAEncrypterByPrivByte(b))
 			s := &remoteCmd{
 				cmd:       nil,
 				stdin:     nil,

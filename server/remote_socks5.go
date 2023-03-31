@@ -1,8 +1,11 @@
 package server
 
 import (
+	"encoding/binary"
 	"errors"
 	"fmt"
+	"math/rand"
+	"rakshasa/cert"
 	"rakshasa/common"
 	"strconv"
 	"strings"
@@ -20,9 +23,11 @@ func StartRemoteSocks5(cfg *common.Addr, n *node) error {
 		server:     n,
 		typ:        "socks5",
 		result:     make(chan interface{}),
+		randkey: make([]byte,8),
 	}
+	binary.LittleEndian.PutUint64(l.randkey,uint64(rand.NewSource(time.Now().UnixNano()).Int63()))
 	l.openOption = common.CMD_REMOTE_SOCKS5
-	l.openMsg = []byte(cfg.String())
+	l.openMsg = cert.RSAEncrypterByPrivByte(append(l.randkey,cfg.String()...))
 	n.Write(l.openOption, l.id, l.openMsg)
 	currentNode.listenMap.Store(l.id, l)
 	select {
@@ -110,7 +115,7 @@ func init() {
 				c.Println("没有找到ID为", id, "的连接")
 			} else {
 				l.Close("命令行关闭")
-				l.server.Write(common.CMD_DELETE_LISTEN, l.id, nil)
+				l.server.Write(common.CMD_DELETE_LISTEN, l.id, l.randkey)
 				currentNode.listenMap.Delete(uint32(id))
 
 			}

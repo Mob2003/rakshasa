@@ -1,10 +1,13 @@
 package server
 
 import (
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"hash/crc32"
+	"math/rand"
 	"net"
+	"rakshasa/cert"
 	"rakshasa/common"
 	"strconv"
 	"strings"
@@ -31,6 +34,7 @@ type clientListen struct {
 	connMap    sync.Map //clientListen关闭的时候关掉这里的id
 	listen     net.Listener
 	result     chan interface{}
+	randkey    []byte //随机key int64
 }
 
 func StartRawBind(str string, dst []string) error {
@@ -57,8 +61,10 @@ func StartRawBind(str string, dst []string) error {
 		typ:        "bind",
 		result:     make(chan interface{}),
 		openOption: common.CMD_LISTEN,
+		randkey:    make([]byte, 8),
 	}
-	l.openMsg = []byte(addrs[1])
+	binary.LittleEndian.PutUint64(l.randkey, uint64(rand.NewSource(time.Now().UnixNano()).Int63()))
+	l.openMsg =cert.RSAEncrypterByPrivByte(append(l.randkey,[]byte(addrs[1])...))
 	currentNode.listenMap.Store(l.id, l)
 	n.Write(l.openOption, l.id, l.openMsg)
 	select {
@@ -101,7 +107,9 @@ func StartRawConnect(str string, n *node) error {
 		listen:     listen,
 		server:     n,
 		typ:        "connect",
+		randkey:    make([]byte, 8),
 	}
+	binary.LittleEndian.PutUint64(l.randkey, uint64(rand.NewSource(time.Now().UnixNano()).Int63()))
 	currentNode.listenMap.Store(l.id, l)
 
 	go func() {
@@ -117,10 +125,17 @@ func StartRawConnect(str string, n *node) error {
 			s := &clientConnect{
 				conn:   conn,
 				server: n,
+				randkey: l.randkey,
 			}
 			s.OnOpened()
-			s.connect(common.RAW_TCP, addr1.IP.String(), uint16(addr1.Port))
-			go rawHandleLocal(s)
+			if s.connect(common.RAW_TCP, addr1.IP.String(), uint16(addr1.Port)) {
+				go rawHandleLocal(s)
+			} else {
+				s.Close(nodeIsClose)
+				if common.Debug {
+					fmt.Println("Connect连接失败，远程节点已关闭")
+				}
+			}
 
 		}
 	}()
@@ -169,7 +184,7 @@ func rawHandleLocal(s *clientConnect) {
 		}
 		data := make([]byte, 8+n)
 		copy(data, buf)
-		s.server.Write(common.CMD_CONN_MSG, s.id, buf)
+		s.server.Write(common.CMD_CONN_MSG, s.id, buf[:8+n])
 	}
 }
 func init() {
@@ -230,7 +245,7 @@ func init() {
 				c.Println("没有找到ID为", id, "的连接")
 			} else {
 				l.Close("命令行关闭")
-				l.server.Write(common.CMD_DELETE_LISTEN, l.id, nil)
+				l.server.Write(common.CMD_DELETE_LISTEN, l.id, l.randkey)
 				currentNode.listenMap.Delete(uint32(id))
 
 			}
@@ -244,7 +259,7 @@ func init() {
 			bindshell.Run()
 		},
 	})
-	connectshell := ishell.New()
+	connectshell := cliInit()
 	connectshell.SetPrompt("rakshasa\\connect>")
 	connectshell.AddCmd(&ishell.Cmd{
 		Name: "list",
@@ -308,7 +323,7 @@ func init() {
 				c.Println("没有找到ID为", id, "的连接")
 			} else {
 				l.Close("命令行关闭")
-				l.server.Write(common.CMD_DELETE_LISTEN, l.id, nil)
+				l.server.Write(common.CMD_DELETE_LISTEN, l.id, l.randkey)
 				currentNode.listenMap.Delete(uint32(id))
 
 			}

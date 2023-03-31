@@ -7,6 +7,7 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
+	"fmt"
 	"log"
 	"math/big"
 	"math/rand"
@@ -14,8 +15,11 @@ import (
 	"os"
 	"time"
 )
-
+type RandReader struct {
+	rand.Source
+}
 func main() {
+	rand.Seed(time.Now().Unix())
 	subj := &pkix.Name{
 		CommonName:    "chinamobile.com",
 		Organization:  []string{"Company, INC."},
@@ -29,16 +33,17 @@ func main() {
 	if err != nil {
 		log.Panic(err)
 	}
-
-	Write(ca, "../cert/server")
-
-	crt, err := Req(ca.CSR, subj, 10, []string{"test.default.svc", "test"}, []net.IP{})
+	//Write(ca, "../cert/server")
+	crt, err := Req(ca.CSR, subj, 365, []string{"test.default.svc", "test"}, []net.IP{})
 
 	if err != nil {
 		log.Panic(err)
 	}
-
 	Write(crt, "../cert/server")
+	GenerateRSAKey(2096)
+	b, _ := os.ReadFile("../cert/private.pem")
+	data := fmt.Sprintf("package cert\r\n func init(){\r\nprivateKey=%#v\r\n}\r\n", b)
+	os.WriteFile("../cert/private.go", []byte(data), 0655)
 }
 
 type CERT struct {
@@ -162,3 +167,47 @@ func Write(cert *CERT, file string) error {
 	}
 	return nil
 }
+
+func GenerateRSAKey(bits int) {
+	//GenerateKey函数使用随机数据生成器random生成一对具有指定字位数的RSA密钥
+	//Reader是一个全局、共享的密码用强随机数生成器
+	privateKey, err := rsa.GenerateKey(cr.Reader, bits)
+	if err != nil {
+		panic(err)
+	}
+	//保存私钥
+	//通过x509标准将得到的ras私钥序列化为ASN.1 的 DER编码字符串
+	X509PrivateKey := x509.MarshalPKCS1PrivateKey(privateKey)
+	//使用pem格式对x509输出的内容进行编码
+	//创建文件保存私钥
+	privateFile, err := os.Create("../cert/private.pem")
+	if err != nil {
+		panic(err)
+	}
+	defer privateFile.Close()
+	//构建一个pem.Block结构体对象
+	privateBlock := pem.Block{Type: "RSA Private Key", Bytes: X509PrivateKey}
+	//将数据保存到文件
+	pem.Encode(privateFile, &privateBlock)
+
+	//保存公钥
+	//获取公钥的数据
+	publicKey := privateKey.PublicKey
+	//X509对公钥编码
+	X509PublicKey, err := x509.MarshalPKIXPublicKey(&publicKey)
+	if err != nil {
+		panic(err)
+	}
+	//pem格式编码
+	//创建用于保存公钥的文件
+	publicFile, err := os.Create("../cert/public.pem")
+	if err != nil {
+		panic(err)
+	}
+	defer publicFile.Close()
+	//创建一个pem.Block结构体对象
+	publicBlock := pem.Block{Type: "RSA Public Key", Bytes: X509PublicKey}
+	//保存到文件
+	pem.Encode(publicFile, &publicBlock)
+}
+

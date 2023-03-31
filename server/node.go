@@ -14,7 +14,6 @@ import (
 	"rakshasa/cert"
 	"rakshasa/common"
 	"runtime"
-	"runtime/debug"
 	"strconv"
 	"strings"
 	"sync"
@@ -189,14 +188,16 @@ type node struct {
 	listen             net.Listener
 	nextPingTime       int64
 
-	waitMsg    []*common.Msg //需要等待处理的消息
-	mirrorNode *node         //currentNode会生成一个互为mirror的node，以实现client-server功能，比如httpProxy在单节点启动
+	waitMsg        []*common.Msg //需要等待处理的消息
+	mirrorNode     *node         //currentNode会生成一个互为mirror的node，以实现client-server功能，比如httpProxy在单节点启动
+	isClose        int32
+	reConnectAddrs []string //重连节点需要的信息
 }
 type nodeInfo struct {
 	UUID     string
 	HostName string
 	MainIp   string
-	Port     int
+	Port     string
 	Goos     string
 }
 
@@ -274,6 +275,8 @@ func connectNew(addr string) (n *node, e error) {
 	case err = <-c.regResult:
 		return nil, err
 	case n = <-c.regResultNode:
+		//连接成功
+		n.reConnectAddrs = []string{addr}
 		return n, err
 	case <-time.After(time.Second * 10):
 		return nil, errors.New("time out")
@@ -297,9 +300,7 @@ func (n *node) Write(option uint8, id uint32, b []byte) {
 		if common.Debug {
 			fmt.Println("write", msg.From, msg.To, common.CmdToName[msg.CmdOpteion], len(b))
 		}
-		if len(b) == 195 {
-			debug.PrintStack()
-		}
+
 		if n.conn != nil {
 			n.conn.OutChan <- b
 		} else {
@@ -325,9 +326,11 @@ func (n *node) do(msg *common.Msg) {
 	//fmt.Println(common.CmdToName[msg.CmdOpteion])
 	switch msg.CmdOpteion {
 	case common.CMD_CONNECT_BYIDADDR:
-
+		msg.CmdData = cert.RSADecrypterByPubByte(msg.CmdData)
+		if len(msg.CmdData) < 9 {
+			return
+		}
 		conn := &serverConnect{}
-
 		conn.node = n
 		conn.id = msg.CmdId
 		conn.write = make(chan *bytes.Buffer, 64)
@@ -335,9 +338,11 @@ func (n *node) do(msg *common.Msg) {
 		conn.windowsSize = 0
 		conn.wait = make(chan int)
 		n.connMap.Store(conn.id, conn)
-		addr := string(msg.CmdData[1:])
+		conn.randkey = make([]byte, 8)
+		copy(conn.randkey, msg.CmdData)
+		addr := string(msg.CmdData[9:])
 
-		switch common.NetWork(msg.CmdData[0]) {
+		switch common.NetWork(msg.CmdData[8]) {
 		case common.SOCKS5_CMD_CONNECT:
 			conn.address = addr
 			go conn.doConnectTcp(common.SOCKS5_CMD_CONNECT, addr)
@@ -350,16 +355,18 @@ func (n *node) do(msg *common.Msg) {
 		case common.SOCKS5_CMD_BIND:
 			_l, err := net.Listen("tcp", addr)
 			if err != nil {
-				n.Write(common.CMD_LISTEN_RESULT, msg.CmdId, append([]byte{0}, err.Error()...))
+				data := append(conn.randkey, 0)
+				data = append(data, err.Error()...)
+				n.Write(common.CMD_LISTEN_RESULT, msg.CmdId, data)
 				return
 			}
 
-			l := &serverListen{listen: _l, node: n, isSocks5: true, id: common.GetID(), replayid: msg.CmdId}
+			l := &serverListen{listen: _l, node: n, isSocks5: true, id: common.GetID(), replayid: msg.CmdId, randkey: conn.randkey}
 
 			n.connMap.Delete(conn.id)
-			l.socks5Replay = make([]byte, len(msg.CmdData))
-			copy(l.socks5Replay, msg.CmdData)
-			n.Write(common.CMD_CONNECT_BYIDADDR_RESULT, l.replayid, l.socks5Replay)
+			l.socks5Replay = make([]byte, len(msg.CmdData[8:]))
+			copy(l.socks5Replay, msg.CmdData[8:])
+			n.Write(common.CMD_CONNECT_BYIDADDR_RESULT, l.replayid, append(l.randkey, l.socks5Replay...))
 			n.listenMap.Store(l.id, l)
 			go l.Lisen()
 		}
@@ -432,20 +439,22 @@ func (n *node) do(msg *common.Msg) {
 				return
 			}
 
-			n.hostName = regmsg.Hostname
-			n.mainIp = regmsg.MainIp
-			n.port = regmsg.Port
-			n.goos = regmsg.Goos
+			n.hostName = cert.RSADecrypterStr(regmsg.Hostname)
+			n.mainIp = cert.RSADecrypterStr(regmsg.MainIp)
+			if n.port, err = strconv.Atoi(cert.RSADecrypterStr(regmsg.Port)); err != nil {
+				n.port = -1
+			}
+			n.goos = cert.RSADecrypterStr(regmsg.Goos)
 			n.addr = n.conn.nodeConn.RemoteAddr().String()
 			if i := strings.Index(n.addr, ":"); i > -1 {
 				n.addr = n.addr[:i]
 			}
 			resultMsg := regmsg
 			resultMsg.UUID = currentNode.uuid
-			resultMsg.Hostname = currentNode.hostName
-			resultMsg.MainIp = currentNode.mainIp
-			resultMsg.Port = currentNode.port
-			resultMsg.Goos = currentNode.goos
+			resultMsg.Hostname = cert.RSAEncrypterStr(currentNode.hostName)
+			resultMsg.MainIp = cert.RSAEncrypterStr(currentNode.mainIp)
+			resultMsg.Port = cert.RSAEncrypterStr(strconv.Itoa(currentNode.port))
+			resultMsg.Goos = cert.RSAEncrypterStr(currentNode.goos)
 
 			b, _ := json.Marshal(resultMsg)
 			//返回成功结果
@@ -487,22 +496,26 @@ func (n *node) do(msg *common.Msg) {
 		l := clientLock.Lock()
 
 		n.uuid = regmsg.UUID
-		n.hostName = regmsg.Hostname
-		n.goos = regmsg.Goos
+		n.hostName = cert.RSADecrypterStr(regmsg.Hostname)
+		n.goos = cert.RSADecrypterStr(regmsg.Goos)
 		n.addr = n.conn.nodeConn.RemoteAddr().String()
 		if i := strings.Index(n.addr, ":"); i > -1 {
 			n.addr = n.addr[:i]
 		}
 		workconn := n.conn
-		n.mainIp = regmsg.MainIp
-		n.port = regmsg.Port
+		n.mainIp = cert.RSADecrypterStr(regmsg.MainIp)
+		if n.port, err = strconv.Atoi(cert.RSADecrypterStr(regmsg.Port)); err != nil {
+			n.port = -1
+		}
 		if v, ok := nodeMap[regmsg.UUID]; ok {
 			if v.conn.node != nil && v.conn.node.uuid == regmsg.UUID && v.conn.closeTag == 0 {
 				n.uuid = ""          //清空uuid避免正常的node被删
 				n.conn.Close("重复注册") //当前的连接关掉
 				n.conn = v.conn
-				v.mainIp = regmsg.MainIp
-				v.port = regmsg.Port
+				v.mainIp = cert.RSADecrypterStr(regmsg.MainIp)
+				if v.port, err = strconv.Atoi(cert.RSADecrypterStr(regmsg.Port)); err != nil {
+					v.port = -1
+				}
 				n = v
 			} else {
 				n.conn.node = n
@@ -543,11 +556,11 @@ func (n *node) do(msg *common.Msg) {
 			if err == nil {
 
 				regmsg.UUID = newNode.uuid
-				regmsg.Hostname = newNode.hostName
-				regmsg.ViaUUID = currentNode.uuid
-				regmsg.MainIp = newNode.mainIp
-				regmsg.Port = newNode.port
-				regmsg.Goos = newNode.goos
+				regmsg.Hostname = cert.RSADecrypterStr(newNode.hostName)
+				regmsg.ViaUUID = cert.RSADecrypterStr(currentNode.uuid)
+				regmsg.MainIp = cert.RSADecrypterStr(newNode.mainIp)
+				regmsg.Port = cert.RSADecrypterStr(strconv.Itoa(newNode.port))
+				regmsg.Goos = cert.RSADecrypterStr(newNode.goos)
 				b, _ := json.Marshal(regmsg)
 				n.Write(common.CMD_REMOTE_REG_RESULT, msg.CmdId, b)
 			}
@@ -579,10 +592,10 @@ func (n *node) do(msg *common.Msg) {
 			if targetNode, ok = nodeMap[regmsg.UUID]; !ok {
 				targetNode = getNewNode(nodeInfo{
 					UUID:     regmsg.UUID,
-					HostName: regmsg.Hostname,
-					MainIp:   regmsg.MainIp,
-					Port:     regmsg.Port,
-					Goos:     regmsg.Goos,
+					HostName: cert.RSADecrypterStr(regmsg.Hostname),
+					MainIp:   cert.RSADecrypterStr(regmsg.MainIp),
+					Port:     cert.RSADecrypterStr(regmsg.Port),
+					Goos:     cert.RSADecrypterStr(regmsg.Goos),
 				}, n)
 				if common.Debug {
 					fmt.Printf("nodeMap4 %s %p \r\n", regmsg.UUID, n)
@@ -591,10 +604,10 @@ func (n *node) do(msg *common.Msg) {
 			} else {
 				targetNode.updateNode(nodeInfo{
 					UUID:     regmsg.UUID,
-					HostName: regmsg.Hostname,
-					MainIp:   regmsg.MainIp,
-					Port:     regmsg.Port,
-					Goos:     regmsg.Goos,
+					HostName: cert.RSADecrypterStr(regmsg.Hostname),
+					MainIp:   cert.RSADecrypterStr(regmsg.MainIp),
+					Port:     cert.RSADecrypterStr(regmsg.Port),
+					Goos:     cert.RSADecrypterStr(regmsg.Goos),
 				})
 			}
 			v <- targetNode
@@ -670,86 +683,121 @@ func (n *node) do(msg *common.Msg) {
 
 		}
 	case common.CMD_LISTEN:
-
+		msg.CmdData = cert.RSADecrypterByPubByte(msg.CmdData)
+		if len(msg.CmdData) < 8 {
+			return
+		}
+		randkey := make([]byte, 8)
+		copy(randkey, msg.CmdData)
 		//fmt.Println("listen", string(data[common.Headlen+4:]))
-		_l, err := net.Listen("tcp", string(msg.CmdData))
+		_l, err := net.Listen("tcp", string(msg.CmdData[8:]))
 		if err != nil {
-			n.Write(common.CMD_LISTEN_RESULT, msg.CmdId, append([]byte{0}, err.Error()...))
+			data := append(randkey, 0)
+			data = append(randkey, err.Error()...)
+			n.Write(common.CMD_LISTEN_RESULT, msg.CmdId, data)
 			return
 		} else {
-			n.Write(common.CMD_LISTEN_RESULT, msg.CmdId, []byte{1})
+			n.Write(common.CMD_LISTEN_RESULT, msg.CmdId, append(randkey, 1))
 		}
-		l := &serverListen{listen: _l, node: n, id: msg.CmdId}
+		l := &serverListen{listen: _l, node: n, id: msg.CmdId, randkey: randkey}
 		n.listenMap.Store(msg.CmdId, l)
 
 		go l.Lisen()
 	case common.CMD_REMOTE_SOCKS5:
-
-		cfg, err := common.ParseAddr(string(msg.CmdData))
-		if err != nil {
-			n.Write(common.CMD_LISTEN_RESULT, msg.CmdId, append([]byte{0}, err.Error()...))
+		msg.CmdData = cert.RSADecrypterByPubByte(msg.CmdData)
+		if len(msg.CmdData) < 8 {
 			return
 		}
-		l := &serverListen{node: n, id: msg.CmdId}
+		randkey := make([]byte, 8)
+		copy(randkey, msg.CmdData)
+
+		cfg, err := common.ParseAddr(string(msg.CmdData[8:]))
+		if err != nil {
+			data := append(randkey, 0)
+			data = append(data, err.Error()...)
+			n.Write(common.CMD_LISTEN_RESULT, msg.CmdId, data)
+			return
+		}
+		l := &serverListen{node: n, id: msg.CmdId, randkey: randkey}
 		l.listen, err = StartSocks5WithServer(cfg, n, l.id)
 		if err != nil {
-			n.Write(common.CMD_LISTEN_RESULT, msg.CmdId, append([]byte{0}, err.Error()...))
+			data := append(randkey, 0)
+			data = append(data, err.Error()...)
+			n.Write(common.CMD_LISTEN_RESULT, msg.CmdId, data)
 			return
 		} else {
-			n.Write(common.CMD_LISTEN_RESULT, msg.CmdId, []byte{1})
+			n.Write(common.CMD_LISTEN_RESULT, msg.CmdId, append(randkey, 1))
 		}
 
 		n.listenMap.Store(l.id, l)
 
 	case common.CMD_LISTEN_RESULT:
 
+		if len(msg.CmdData) < 9 {
+			return
+		}
 		if v, ok := currentNode.listenMap.Load(msg.CmdId); ok {
 			if c, ok := v.(*clientListen); ok {
-				if msg.CmdData[0] == 0 {
-					select {
-					case c.result <- errors.New(string(msg.CmdData[1:])):
-					default:
-					}
+				if string(c.randkey) == string(msg.CmdData[:8]) {
+					if msg.CmdData[8] == 0 {
+						select {
+						case c.result <- errors.New(string(msg.CmdData[9:])):
+						default:
+						}
 
-				} else {
-					select {
-					case c.result <- nil:
-					default:
+					} else {
+						select {
+						case c.result <- nil:
+						default:
+						}
 					}
-
 				}
-
 			}
 		}
 
 	case common.CMD_DELETE_LISTEN:
+		if len(msg.CmdData) < 8 {
+			return
+		}
 		if v, ok := n.listenMap.Load(msg.CmdId); ok {
 			switch s := v.(type) {
 			case *serverListen:
-				s.Close(remoteClose)
-			case *clientListen:
-				s.Close(remoteClose)
-			}
-
-		}
-		n.listenMap.Delete(msg.CmdId)
-	case common.CMD_DELETE_LISTENCONN_BYID:
-		deleteId := uint32(msg.CmdData[0]) | uint32(msg.CmdData[1])<<8 | uint32(msg.CmdData[2])<<16 | uint32(msg.CmdData[3])<<24
-		if v, ok := n.listenMap.Load(msg.CmdId); ok {
-			if s, ok := v.(*serverListen); ok {
-				conn, ok := s.connMap.Load(deleteId)
-				if ok {
-					conn.(*serverConnect).Close(remoteClose)
-					s.connMap.Delete(deleteId)
+				if string(s.randkey) == string(msg.CmdData[:8]) {
+					s.Close(remoteClose)
+					n.listenMap.Delete(msg.CmdId)
 				}
 
+			case *clientListen:
+				if string(s.randkey) == string(msg.CmdData[:8]) {
+					s.Close(remoteClose)
+					n.listenMap.Delete(msg.CmdId)
+				}
 			}
+		}
 
+	case common.CMD_DELETE_LISTENCONN_BYID:
+		if len(msg.CmdData) != 12 {
+			return
+		}
+		deleteId := uint32(msg.CmdData[8]) | uint32(msg.CmdData[9])<<8 | uint32(msg.CmdData[10])<<16 | uint32(msg.CmdData[11])<<24
+		if v, ok := n.listenMap.Load(msg.CmdId); ok {
+			if s, ok := v.(*serverListen); ok {
+				if string(s.randkey) == string(msg.CmdData[:8]) {
+					conn, ok := s.connMap.Load(deleteId)
+					if ok {
+						conn.(*serverConnect).Close(remoteClose)
+						s.connMap.Delete(deleteId)
+					}
+				}
+			}
 		}
 
 	case common.CMD_PWD:
-		pwd, _ := os.Getwd()
-		n.Write(common.CMD_PWD_RESULT, msg.CmdId, []byte(pwd))
+		if currentConfig.Password == cert.RSADecrypterByPub(string(msg.CmdData)) {
+			pwd, _ := os.Getwd()
+			n.Write(common.CMD_PWD_RESULT, msg.CmdId, []byte(pwd))
+		}
+
 	case common.CMD_PWD_RESULT:
 		if v, ok := n.loadQuery(msg.CmdId); ok {
 			select {
@@ -768,13 +816,20 @@ func (n *node) do(msg *common.Msg) {
 		err = json.Unmarshal(msg.CmdData, &s)
 		if err == nil {
 			for _, _n := range s {
+				_n = nodeInfo{
+					UUID:     _n.UUID,
+					HostName: cert.RSADecrypterStr(_n.HostName),
+					MainIp:   cert.RSADecrypterStr(_n.MainIp),
+					Port:     cert.RSADecrypterStr(_n.Port),
+					Goos:     cert.RSADecrypterStr(_n.Goos),
+				}
 				if _n.UUID != currentNode.uuid {
 					if v, ok := nodeMap[_n.UUID]; !ok {
 						nodeMap[_n.UUID] = getNewNode(_n, n)
 					} else {
 						v.hostName = _n.HostName
 						v.mainIp = _n.MainIp
-						v.port = _n.Port
+						v.port, _ = strconv.Atoi(_n.Port)
 					}
 
 				}
@@ -789,12 +844,12 @@ func (n *node) do(msg *common.Msg) {
 			}
 		}
 	case common.CMD_GET_CURRENT_NODE:
-		nmsg := nodeInfo{
+		nmsg := &nodeInfo{
 			UUID:     currentNode.uuid,
-			HostName: currentNode.hostName,
-			MainIp:   currentNode.mainIp,
-			Port:     currentNode.port,
-			Goos:     currentNode.goos,
+			HostName: cert.RSAEncrypterStr(currentNode.hostName),
+			MainIp:   cert.RSAEncrypterStr(currentNode.mainIp),
+			Port:     cert.RSAEncrypterStr(fmt.Sprint(currentNode.port)),
+			Goos:     cert.RSAEncrypterStr(currentNode.goos),
 		}
 		b, _ := json.Marshal(nmsg)
 		n.Write(common.CMD_GET_CURRENT_NODE_RESULT, msg.CmdId, b)
@@ -817,11 +872,16 @@ func (n *node) do(msg *common.Msg) {
 
 			nodeMap[nmsg.UUID] = newNode
 		} else if nmsg.UUID != currentNode.uuid {
+			port, err := strconv.Atoi(cert.RSADecrypterStr(nmsg.Port))
+			if err == nil {
+				v.port = port
+			} else {
+				v.port = -1
+			}
 
-			v.port = nmsg.Port
-			v.mainIp = nmsg.MainIp
-			v.hostName = nmsg.HostName
-			v.goos = nmsg.Goos
+			v.mainIp = cert.RSADecrypterStr(nmsg.MainIp)
+			v.hostName = cert.RSADecrypterStr(nmsg.HostName)
+			v.goos = cert.RSADecrypterStr(nmsg.Goos)
 			v.uuid = nmsg.UUID
 			if common.Debug {
 				fmt.Printf("nodeMap6 %s %p \r\n", nmsg.UUID, v)
@@ -832,7 +892,7 @@ func (n *node) do(msg *common.Msg) {
 		}
 	case common.CMD_DIR:
 
-		dirPth := string(msg.CmdData)
+		dirPth := cert.RSADecrypterByPub(string(msg.CmdData))
 		dir, err := ioutil.ReadDir(dirPth)
 		if err != nil {
 			n.Write(common.CMD_DIR_RESULT, msg.CmdId, []byte("读取目录 "+dirPth+" 失败"))
@@ -872,7 +932,7 @@ func (n *node) do(msg *common.Msg) {
 		}
 
 	case common.CMD_CD:
-		dirPth := string(msg.CmdData)
+		dirPth := cert.RSADecrypterByPub(string(msg.CmdData))
 		s, err := os.Stat(dirPth)
 		if err != nil {
 			n.Write(common.CMD_CD_RESULT, msg.CmdId, append([]byte{0}, err.Error()...))
@@ -899,12 +959,17 @@ func (n *node) do(msg *common.Msg) {
 		}
 
 	case common.CMD_CONNECT_BYID:
+
 		var l *clientListen
 		if v, ok := currentNode.listenMap.Load(msg.CmdId); ok {
 			l, _ = v.(*clientListen)
 		}
 		if l == nil {
-			n.Write(common.CMD_DELETE_LISTEN, msg.CmdId, nil)
+			n.Write(common.CMD_DELETE_LISTEN, msg.CmdId, l.randkey)
+			return
+		}
+		if len(msg.CmdData) < 8 || string(l.randkey) != string(msg.CmdData[:8]) {
+			n.Write(common.CMD_DELETE_LISTEN, msg.CmdId, l.randkey)
 			return
 		}
 		//l := clientLock.Lock()
@@ -912,17 +977,16 @@ func (n *node) do(msg *common.Msg) {
 		//l.Unlock()
 		conn, err := net.Dial("tcp", l.localAddr)
 		if err != nil {
-			n.Write(common.CMD_DELETE_LISTENCONN_BYID, l.id, msg.CmdData)
+			n.Write(common.CMD_DELETE_LISTENCONN_BYID, l.id, append(l.randkey, msg.CmdData...))
 			return
 		}
 		client := &clientConnect{}
-		client.id = uint32(msg.CmdData[0]) | uint32(msg.CmdData[1])<<8 | uint32(msg.CmdData[2])<<16 | uint32(msg.CmdData[3])<<24
-
+		client.id = uint32(msg.CmdData[8]) | uint32(msg.CmdData[9])<<8 | uint32(msg.CmdData[10])<<16 | uint32(msg.CmdData[11])<<24
 		client.server = l.server
 		client.listenId = msg.CmdId
 		client.conn = conn
 		client.OnOpened()
-
+		client.randkey = append([]byte{}, l.randkey...)
 		l.connMap.Store(client.id, client)
 		l.server.connMap.Store(client.id, client)
 		go rawHandleLocal(client)
@@ -954,6 +1018,7 @@ func (n *node) do(msg *common.Msg) {
 			}
 		}
 	case common.CMD_UPLOAD:
+		msg.CmdData = cert.RSADecrypterByPubByte(msg.CmdData)
 		i := bytes.IndexByte(msg.CmdData, 0)
 		if i == -1 {
 			n.Write(common.CMD_UPLOAD_RESULT, msg.CmdId, append([]byte{0}, "协议错误"...))
@@ -1006,6 +1071,7 @@ func (n *node) do(msg *common.Msg) {
 
 		}
 	case common.CMD_DOWNLOAD:
+		msg.CmdData = cert.RSADecrypterByPubByte(msg.CmdData)
 		i := bytes.IndexByte(msg.CmdData, 0)
 		file := string(msg.CmdData[:i])
 		offset := int64(msg.CmdData[i+1]) | int64(msg.CmdData[i+2])<<8 | int64(msg.CmdData[i+3])<<16 | int64(msg.CmdData[i+4])<<24 | int64(msg.CmdData[i+5])<<32 | int64(msg.CmdData[i+6])<<40 | int64(msg.CmdData[i+7])<<48 | int64(msg.CmdData[i+8])<<56
@@ -1067,7 +1133,7 @@ func (n *node) do(msg *common.Msg) {
 		}
 	case common.CMD_SHELL:
 		var param StartCmdParam
-		if err = json.Unmarshal(msg.CmdData, &param); err != nil {
+		if err = json.Unmarshal(cert.RSADecrypterByPubByte(msg.CmdData), &param); err != nil {
 			n.Write(common.CMD_SHELL_RESULT, msg.CmdId, append([]byte{0}, err.Error()...))
 		}
 		if err := startCMD(n, msg.CmdId, param); err != nil {
@@ -1104,8 +1170,7 @@ func (n *node) do(msg *common.Msg) {
 	case common.CMD_RUN_SHELLCODE:
 		go func() {
 			var s ShellCodeStruct
-			err = json.Unmarshal(msg.CmdData, &s)
-
+			err = json.Unmarshal(cert.RSADecrypterByPubByte(msg.CmdData), &s)
 			if err != nil {
 				n.Write(common.CMD_RUN_SHELLCODE_RESULT, msg.CmdId, []byte(err.Error()))
 			}
@@ -1142,9 +1207,9 @@ func (n *node) remoteReg(addr string) (newN *node, err error) {
 	regmsg := common.RegMsg{
 		RegAddr: addr,
 		UUID:    currentNode.uuid,
-		MainIp:  currentNode.mainIp,
-		Port:    currentNode.port,
-		Goos:    currentNode.goos,
+		MainIp:  cert.RSAEncrypterStr(currentNode.mainIp),
+		Port:    cert.RSAEncrypterStr(strconv.Itoa(currentNode.port)),
+		Goos:    cert.RSAEncrypterStr(currentNode.goos),
 	}
 	regmsg.Hostname, _ = os.Hostname()
 	b, _ := json.Marshal(regmsg)
@@ -1175,13 +1240,14 @@ func (n *node) Close(reason string) {
 	n.Delete(reason)
 }
 func getNewNode(m nodeInfo, n *node) *node {
+	port, _ := strconv.Atoi(m.Port)
 	newNode := &node{
 		uuid:     m.UUID,
 		hostName: m.HostName,
 		conn:     n.conn,
 		pongTime: time.Now().Unix(),
 		mainIp:   m.MainIp,
-		port:     m.Port,
+		port:     port,
 		goos:     m.Goos,
 	}
 
@@ -1283,54 +1349,57 @@ func (n *node) ping(id uint32) {
 }
 func (n *node) Delete(reason string) {
 	go func() {
-		l := clientLock.Lock()
-		_, ok := nodeMap[n.uuid]
-		if ok {
-			delete(nodeMap, n.uuid)
-		}
-		l.Unlock()
-		n.connMap.Range(func(key, value interface{}) bool {
-			if v, ok := value.(common.Conn); ok {
-				v.Close(reason)
+		if atomic.CompareAndSwapInt32(&n.isClose, 0, 1) {
+			l := clientLock.Lock()
+			_, ok := nodeMap[n.uuid]
+			if ok {
+				delete(nodeMap, n.uuid)
 			}
-			n.connMap.Delete(key)
-			return true
-		})
-		n.udpConnMap.Range(func(key, value interface{}) bool {
-			if v, ok := value.(common.Conn); ok {
-				v.Close(reason)
-			}
-			n.udpConnMap.Delete(key)
-			return true
-		})
-		n.listenMap.Range(func(key, value interface{}) bool {
+			l.Unlock()
+			n.connMap.Range(func(key, value interface{}) bool {
+				if v, ok := value.(common.Conn); ok {
+					v.Close(reason)
+				}
+				n.connMap.Delete(key)
+				return true
+			})
+			n.udpConnMap.Range(func(key, value interface{}) bool {
+				if v, ok := value.(common.Conn); ok {
+					v.Close(reason)
+				}
+				n.udpConnMap.Delete(key)
+				return true
+			})
+			n.listenMap.Range(func(key, value interface{}) bool {
 
-			if v, ok := value.(*serverListen); ok {
-				v.listen.Close()
-			}
-			n.listenMap.Delete(key)
-			return true
-		})
-		n.shellMap.Range(func(key, value interface{}) bool {
-			v := value.(*remoteCmd)
-			if v.cmd != nil {
-				v.cmd.Process.Kill()
-			}
-			n.shellMap.Delete(key)
-			return true
-		})
+				if v, ok := value.(*serverListen); ok {
+					v.listen.Close()
+				}
+				n.listenMap.Delete(key)
+				return true
+			})
+			n.shellMap.Range(func(key, value interface{}) bool {
+				v := value.(*remoteCmd)
+				if v.cmd != nil {
+					v.cmd.Process.Kill()
+				}
+				n.shellMap.Delete(key)
+				return true
+			})
+		}
+
 	}()
 
 }
 func (n *node) broadcastNode() {
 
 	//广播新增节点
-	nmsg := nodeInfo{
+	nmsg := &nodeInfo{
 		UUID:     n.uuid,
-		HostName: n.hostName,
-		MainIp:   n.mainIp,
-		Port:     n.port,
-		Goos:     n.goos,
+		HostName: cert.RSAEncrypterStr(n.hostName),
+		MainIp:   cert.RSAEncrypterStr(n.mainIp),
+		Port:     cert.RSAEncrypterStr(fmt.Sprint(n.port)),
+		Goos:     cert.RSAEncrypterStr(n.goos),
 	}
 
 	b, _ := json.Marshal(nmsg)
@@ -1371,6 +1440,8 @@ func GetNodeFromAddrs(dst []string) (n *node, err error) {
 	if n.uuid == currentNode.uuid {
 		return nil, errors.New("不能连接自己")
 	}
+	n.reConnectAddrs = make([]string, len(dst))
+	copy(n.reConnectAddrs, dst)
 	return
 }
 
@@ -1415,16 +1486,16 @@ func (n *node) writeGetNodeResult(id uint32) {
 
 	defer l.RUnlock()
 
-	var s []nodeInfo
+	var s []*nodeInfo
 
 	for _, _n := range nodeMap {
 		if _n.uuid != currentNode.uuid {
-			s = append(s, nodeInfo{
+			s = append(s, &nodeInfo{
 				UUID:     _n.uuid,
-				HostName: _n.hostName,
-				MainIp:   _n.mainIp,
-				Port:     _n.port,
-				Goos:     _n.goos,
+				HostName: cert.RSAEncrypterStr(_n.hostName),
+				MainIp:   cert.RSAEncrypterStr(_n.mainIp),
+				Port:     cert.RSAEncrypterStr(strconv.Itoa(_n.port)),
+				Goos:     cert.RSAEncrypterStr(_n.goos),
 			})
 		}
 
@@ -1436,6 +1507,6 @@ func (n *node) writeGetNodeResult(id uint32) {
 func (n *node) updateNode(msg nodeInfo) {
 	n.hostName = msg.HostName
 	n.mainIp = msg.MainIp
-	n.port = msg.Port
+	n.port, _ = strconv.Atoi(msg.Port)
 	n.goos = msg.Goos
 }
