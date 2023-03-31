@@ -7,6 +7,10 @@ rakshasa是一个使用Go语言编写的强大多级代理工具，专为实现*
 
 节点之间使用内置证书的TLS加密TCP通讯，再叠加一层自定义秘钥的AES加密，可以在所有Go支持的平台使用。可以在你所有的的Windows和Linux服务器上搭建节点并组成节点群网络。
 
+节点分为普通节点(node)与控制节点(fullnode)
+- 普通节点，无法控制其他节点进行代理、shell等操作
+- 控制节点，全功能节点
+
 ## 项目结构示例和截图
 [点击查看更多介绍](./readme/rakshasa项目设计.md)
 
@@ -14,27 +18,33 @@ rakshasa是一个使用Go语言编写的强大多级代理工具，专为实现*
 
 ## 编译与使用
 
-首先生成证书：
-
+全新生成证书与节点
 ```shell
-cd gencert
-go run main.go
-cd ../
-```
-也可以使用其他工具生成证书，将 server.crt 和 server.key 放到 cert 目录下。然后再编译rakshasa
-
-```shell
-go build
+go run build.go -all
 ```
 
-在 Windows 下使用cmd跨平台编译 Linux 示例：
-
+只生成证书
 ```shell
-cd gencert
-go run main.go
-cd ../
-set GOOS=linux
-go build
+go run build.go -gencert
+```
+
+生成控制节点与普通节点
+```shell
+go run build.go -fullnode
+```
+
+只生成普通节点
+```shell
+go run build.go -node
+```
+
+证书保存在cert目录下
+```shell
+private.go     --编译普通节点的时候要删除此文件
+private.pem  --与public.pem对应的公钥私钥，普通节点不包含私钥
+public.pem
+server.crt     --tls通讯证书
+server.key    --tls通讯私钥
 ```
 
 ## 使用图示

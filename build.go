@@ -10,7 +10,7 @@ import (
 )
 
 func main() {
-	all := flag.Bool("nocli", false, "生成新的证书，使用随机的种子生成控制端节点和普通节点")
+	all := flag.Bool("all", false, "生成新的证书，生成控制端节点和普通节点")
 	gencert := flag.Bool("gencert", false, "生成证书")
 	fullNode := flag.Bool("fullnode", false, "只编译生成控制端节点+普通节点")
 	node := flag.Bool("node", false, "只生成普通节点")
