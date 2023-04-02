@@ -4,15 +4,16 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
-	"github.com/dlclark/regexp2"
-	"github.com/google/uuid"
 	"math/rand"
 	"net"
 	"rakshasa/aes"
+	"regexp"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/google/uuid"
 )
 
 var Debug bool = false
@@ -28,10 +29,10 @@ var EnableTermVt bool
 
 // 数据包结构 包长（2byte）UUID+UUID+MsgId+Ttl+cmd包
 type Msg struct {
-	From  string
-	To    string
-	MsgId uint32
-	Ttl   uint8
+	From       string
+	To         string
+	MsgId      uint32
+	Ttl        uint8
 	CmdOpteion uint8
 	CmdId      uint32
 	CmdData    []byte
@@ -311,13 +312,13 @@ func ResolveTCPAddr(str string) ([]string, error) {
 			dst = append(dst[:i], dst[i+1:]...)
 		} else {
 			if _, err := net.ResolveTCPAddr("tcp", addr); err != nil {
-				if i>0{
-					r, _ := regexp2.Compile(`^[a-z0-9]{8}-[a-z0-9]{4}-[a-z0-9]{4}-[a-z0-9]{4}-[a-z0-9]{12}`, 0)
-					match,_ :=r.MatchString(addr)
-					if !match{
+				if i > 0 {
+					r, _ := regexp.Compile(`^[a-z0-9]{8}-[a-z0-9]{4}-[a-z0-9]{4}-[a-z0-9]{4}-[a-z0-9]{12}`)
+					match := r.MatchString(addr)
+					if !match {
 						return nil, fmt.Errorf("参数错误 格式为\"ip:端口\",多个地址以逗号隔开，错误详情%v", err)
 					}
-				}else{
+				} else {
 					return nil, fmt.Errorf("参数错误 格式为\"ip:端口,第二个地址可以是UUID\",多个地址以逗号隔开，错误详情%v", err)
 				}
 

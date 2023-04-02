@@ -17,6 +17,6 @@ del "private.go"
 cd ../build
 build_node.bat
 ) ELSE (
-	echo 找不到private.go,请使用 go run build.go -full-node来编译
+	echo 找不到private.go,请使用 go run build.go -fullnode来编译
 ping -n 3 127.0.0.1 > nul
 ) 

@@ -6,6 +6,7 @@ package server
  */
 import (
 	"bytes"
+	"cert"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -13,8 +14,9 @@ import (
 	"os"
 	"os/exec"
 	"rakshasa/aes"
-	"rakshasa/cert"
 	"rakshasa/common"
+
+	"regexp"
 	"runtime"
 	"strconv"
 	"strings"
@@ -24,7 +26,6 @@ import (
 
 	"github.com/abiosoft/readline"
 	"github.com/creack/pty"
-	"github.com/dlclark/regexp2"
 	"github.com/luyu6056/ishell"
 	"golang.org/x/text/encoding/simplifiedchinese"
 	"golang.org/x/text/transform"
@@ -109,7 +110,7 @@ func init() {
 			c.Println(c.Args)
 			currentConfig.Password = c.Args[0]
 			currentConfig.FileSave = false
-			aes.Key = aes.MD5_B(currentConfig.Password + string(cert.PrivateKey[:16]))
+			aes.Key = aes.MD5_B(currentConfig.Password + string(cert.RsaPrivateKey[:16]))
 		},
 	})
 	configShell.AddCmd(&ishell.Cmd{
@@ -133,7 +134,9 @@ func init() {
 			currentConfig.Port = port
 			currentNode.port = port
 			currentConfig.FileSave = false
-			StartServer(fmt.Sprintf("%s:%d", currentConfig.ListenIp, currentConfig.Port))
+			if err := StartServer(fmt.Sprintf(":%d",  currentConfig.Port)); err != nil {
+				c.Printf("启动节点失败 %v, 请重新修改监听端口",currentConfig.Port)
+			}
 		},
 	})
 
@@ -261,7 +264,7 @@ func init() {
 				pwd = dir
 			} else {
 				pwd += "/" + dir
-				pwd = strings.TrimRight(realpath(pwd), "/")
+				pwd = strings.TrimRight(getRealPath(pwd), "/")
 			}
 
 			resChan := make(chan interface{}, 1)
@@ -326,7 +329,7 @@ func init() {
 			}
 			filename := pwd[i+1:]
 			dir := pwd[:i]
-			dir = strings.TrimRight(realpath(dir), "/") + "/"
+			dir = strings.TrimRight(getRealPath(dir), "/") + "/"
 			pwd = dir + filename
 			resChan := make(chan interface{}, 9999) //避免收消息阻塞
 
@@ -432,7 +435,7 @@ func init() {
 			}
 			filename := pwd[i+1:]
 			dir := pwd[:i]
-			dir = strings.TrimRight(realpath(dir), "/") + "/"
+			dir = strings.TrimRight(getRealPath(dir), "/") + "/"
 			mydir, err := os.Getwd()
 			local := "./" + filename
 			if err == nil {
@@ -468,7 +471,7 @@ func init() {
 			b[be+5] = byte(total >> 40)
 			b[be+6] = byte(total >> 48)
 			b[be+7] = byte(total >> 56)
-			n.Write(common.CMD_DOWNLOAD, id,cert.RSAEncrypterByPrivByte(b))
+			n.Write(common.CMD_DOWNLOAD, id, cert.RSAEncrypterByPrivByte(b))
 			c.ProgressBar().Start()
 			size := int64(0)
 			resnum := 0
@@ -621,8 +624,8 @@ func init() {
 							if !common.EnableTermVt {
 								s.translate = func(in []byte) ([]byte, error) {
 									if in[0] == 27 {
-										r, _ := regexp2.Compile(`\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])`, 0)
-										res, _ := r.Replace(string(in), "", 0, -1)
+										r, _ := regexp.Compile(`\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])`)
+										res := r.ReplaceAllString(string(in), "")
 										return []byte(res), nil
 									}
 									return in, nil
@@ -758,7 +761,7 @@ func printNodes(c *ishell.Context) {
 	}
 }
 
-func realpath(path string) string {
+func getRealPath(path string) string {
 
 	path_s := strings.Split(path, "/")
 	realpath := []string{}

@@ -2,6 +2,7 @@ package server
 
 import (
 	"bytes"
+	"cert"
 	"crypto/tls"
 	"encoding/json"
 	"fmt"
@@ -10,7 +11,6 @@ import (
 	"net"
 	"net/url"
 	"rakshasa/aes"
-	"rakshasa/cert"
 	"rakshasa/common"
 	"strconv"
 	"strings"
@@ -690,12 +690,6 @@ func (c *Conn) handle() {
 func (c *Conn) reg() error {
 
 	var err error
-
-	c.nodeConn, err = tls.Dial("tcp", c.nodeaddr, cert.Tlsconfig.Clone())
-	if err != nil {
-		return err
-	}
-
 	reg := &common.RegMsg{
 		UUID:     currentNode.uuid,
 		MainIp:   cert.RSAEncrypterStr(currentNode.mainIp),
@@ -710,7 +704,6 @@ func (c *Conn) reg() error {
 		CmdOpteion: common.CMD_REG,
 		CmdData:    regb,
 	}
-
 	if err = c.tlsWrite(msg.Marshal()); err != nil {
 		return err
 	}
@@ -734,7 +727,15 @@ func (c *Conn) Write(b []byte) {
 
 func (c *Conn) tlsWrite(b []byte) error {
 	c.nodeConn.SetWriteDeadline(time.Now().Add(common.WRITE_DEADLINE))
-	_, err := c.nodeConn.Write(b)
+	n, err := c.nodeConn.Write(b)
+	if common.Debug {
+		if c.node!=nil{
+			fmt.Println("writeto", c.node.uuid, n)
+		}else{
+			fmt.Println("writeto",common.NoneUUID, n)
+		}
+
+	}
 	if err != nil {
 		c.Close("Write " + err.Error())
 		upNodeWrite <- b

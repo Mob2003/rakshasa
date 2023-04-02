@@ -1,13 +1,13 @@
 package main
 
 import (
+	"cert"
 	"flag"
 	"fmt"
 	"log"
 	"net/http"
 	_ "net/http/pprof"
 	"rakshasa/aes"
-	"rakshasa/cert"
 	"rakshasa/common"
 	"rakshasa/httppool"
 	"rakshasa/server"
@@ -108,7 +108,7 @@ func main() {
 	server.SetConfig(config)
 
 	//设置一下秘钥
-	aes.Key = aes.MD5_B(config.Password + string(cert.PrivateKey[:16]))
+	aes.Key = aes.MD5_B(config.Password + string(cert.RsaPrivateKey[:16]))
 	//初始化node
 	server.InitCurrentNode()
 
@@ -133,7 +133,7 @@ func main() {
 	if *shellCode != "" {
 		server.RunShellcodeWithDst(*dstNode, *shellCode, *shellCodeXorKey, *shellCodeParam, *shellCodeTimeout)
 	}
-	if err := server.StartServer(fmt.Sprintf("%s:%d", config.ListenIp, config.Port)); err != nil {
+	if err := server.StartServer(fmt.Sprintf(":%d",  config.Port)); err != nil {
 		log.Fatalln(err)
 	}
 

@@ -30,7 +30,7 @@ rakshasa是一个用Go编写的程序，旨在创建一个能够实现**多级�
 - Go语言：因为Go语言是一门高效的并发编程语言，非常适合网络编程。
 - github.com/abiosoft/ishell包：实现各操作系统中的CLI。
 - github.com/creack/pty包：实现Linux伪终端，可以执行交互式命令与更高级的终端显示效果。
-- github.com/dlclark/regexp2包：全功能正则表达式 。
+- github.com/farmerx/gorsa包：实现私钥加密公钥解密，用来解决节点权限限制。
 
 ## 4. 项目结构
 

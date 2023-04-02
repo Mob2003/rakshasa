@@ -14,16 +14,22 @@ rakshasa是一个使用Go语言编写的强大多级代理工具，专为实现*
 ## 项目结构示例和截图
 [点击查看更多介绍](./readme/rakshasa项目设计.md)
 
+[win10+Proxifier实现内网穿透](./readme/rakshasa内网穿透--win10+Proxifier使用案例.md)
 
 
 ## 编译与使用
 
-全新生成证书与节点
+生成新的证书，编译所有版本节点
 ```shell
 go run build.go -all
 ```
 
-只生成证书
+编译所有版本节点（不更新证书）
+```shell
+go run build.go -all -nocert
+```
+
+生成覆盖证书
 ```shell
 go run build.go -gencert
 ```
@@ -38,7 +44,7 @@ go run build.go -fullnode
 go run build.go -node
 ```
 
-证书保存在cert目录下
+证书保存在cert目录下，可以使用第三方工具生成，请使用RSA PKCS1-V1.5
 ```shell
 private.go     --编译普通节点的时候要删除此文件
 private.pem  --与public.pem对应的公钥私钥，普通节点不包含私钥
@@ -46,6 +52,23 @@ public.pem
 server.crt     --tls通讯证书
 server.key    --tls通讯私钥
 ```
+## 版本区别
+
+|     | fullnode  | node|fullnode_lite|node_lite|
+|  ----  | ----  |----  |----  |----  |
+|连接其他节点  | √ |√ |√ |√ |
+|启动本地socks5代理 | √ |√ |√ |√ |
+|启动本地http代理 | √ |√ |√ |√ |
+|启动多层代理 | √ |× |√ |× |
+|远程shell| √ |× |√ |× |
+|其他远程功能| √ |× |√ |× |
+| 交互式CLI  | √ |√ |× |× |
+| check_proxy  | √ |√ |× |× |
+
+简单来讲
+- fullnode 完全版，能控制别人，也能被控
+- node 能连接其他节点，但是不能对其他节点操控，适合作为被控端
+- lite版本，精简掉cli和net/http，与一些debug的代码
 
 ## 使用图示
 ![image](https://user-images.githubusercontent.com/128351726/226882870-f4f3cbc0-61df-486c-afc0-511d87586402.png)

@@ -2,6 +2,7 @@ package server
 
 import (
 	"bytes"
+	"cert"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -9,7 +10,6 @@ import (
 	"log"
 	"math/rand"
 	"net"
-	"rakshasa/cert"
 	"rakshasa/common"
 	"runtime/debug"
 	"strconv"
@@ -23,8 +23,6 @@ import (
 )
 
 const (
-	STATUS_OFF      = 0
-	STATUS_ON       = 1
 	UDP_PORT_MIN    = 30000
 	UDP_PORT_MAX    = 60000
 	SOCKES5_VERSION = 5
@@ -32,13 +30,11 @@ const (
 
 var (
 	SOCKES5_AUTH_SUSSCES   []byte = []byte{5, 0}
-	SOCKES5_AUTHPW_SUSSCES []byte = []byte{5, 2}
-
+	SOCKES5_AUTH_SUSSCES_PASSWD []byte = []byte{5, 2}
 	PROTOCOL_ERR = errors.New("protocolErr")
 )
 
 const (
-	SERVER_NUM        = 4 //有效的连接数量
 	CONN_AUTH_CLOSE   = 0
 	CONN_AUTH_NONE    = 1
 	CONN_AUTH_PW      = 2
@@ -270,7 +266,7 @@ func handleSocks5Local(s *clientConnect) {
 			if len(data) > 2 {
 				if data[0] == 5 {
 					if s.cfg.User() != "" && s.cfg.Password() != "" {
-						s.conn.Write(SOCKES5_AUTH_SUSSCES)
+						s.conn.Write(SOCKES5_AUTH_SUSSCES_PASSWD)
 						s.auth = CONN_AUTH_PW
 					} else {
 						s.conn.Write(SOCKES5_AUTH_SUSSCES)

@@ -2,6 +2,7 @@ package server
 
 import (
 	"bytes"
+	"cert"
 	"crypto/tls"
 	"encoding/json"
 	"errors"
@@ -11,7 +12,6 @@ import (
 	"math/rand"
 	"net"
 	"os"
-	"rakshasa/cert"
 	"rakshasa/common"
 	"runtime"
 	"strconv"
@@ -226,18 +226,21 @@ func connectNew(addr string) (n *node, e error) {
 		addrs, e := i.Addrs()
 		if e == nil {
 			for _, localAddr := range addrs {
-				go func() {
+				go func(localAddr net.Addr) {
 					localstr := localAddr.String()
 					localstr = localstr[:strings.LastIndex(localstr, "/")] + ":0"
 					laddr, _ := net.ResolveTCPAddr("tcp", localstr)
-					if netconn, e := net.DialTCP("tcp", laddr, raddr); e == nil {
-						conn := tls.Client(netconn, config)
-						select {
-						case connChan <- conn:
-						default:
+					if laddr!=nil{
+						if netconn, e := net.DialTCP("tcp", laddr, raddr); e == nil {
+							conn := tls.Client(netconn, config)
+							select {
+							case connChan <- conn:
+							default:
+							}
 						}
 					}
-				}()
+
+				}(localAddr)
 			}
 		}
 	}
@@ -470,6 +473,8 @@ func (n *node) do(msg *common.Msg) {
 
 			}
 			currentNode.broadcastNode()
+			//把本机所有节点同步到注册机器
+			go n.writeGetNodeResult(msg.CmdId)
 		}()
 	case common.CMD_REG_RESULT:
 		var regmsg common.RegMsg
@@ -536,8 +541,8 @@ func (n *node) do(msg *common.Msg) {
 		default:
 		}
 
-		//回复节点
-		//n.writeGetNodeResult(msg.CmdId)
+		//交换节点
+		n.writeGetNodeResult(msg.CmdId)
 
 	case common.CMD_REMOTE_REG:
 
@@ -616,8 +621,7 @@ func (n *node) do(msg *common.Msg) {
 		}
 
 		l.Unlock()
-		//fmt.Printf("connect to %s(%s) success\n", regmsg.UUID, regmsg.RegAddr)
-		//n.writeGetNodeResult(msg.CmdId)
+		n.writeGetNodeResult(msg.CmdId)
 
 	case common.CMD_PING:
 		n.Write(common.CMD_PONG, msg.CmdId, append(msg.CmdData, n.conn.nodeConn.LocalAddr().String()...))
@@ -1427,18 +1431,17 @@ func GetNodeFromAddrs(dst []string) (n *node, err error) {
 	if n, err = getNode(dst[0]); err != nil {
 		return
 	}
-
+	if n.uuid == currentNode.uuid {
+		return nil, errors.New("不能连接自己")
+	}
 	for i := 1; i < len(dst); i++ {
 		n, err = n.remoteReg(dst[i])
 		if err != nil {
 			return nil, fmt.Errorf("%s,%v", dst[i], err)
 		}
-	}
-	if n == nil {
-		return nil, fmt.Errorf("无法连接 %v", dst)
-	}
-	if n.uuid == currentNode.uuid {
-		return nil, errors.New("不能连接自己")
+		if n.uuid == currentNode.uuid {
+			return nil, errors.New("不能连接自己")
+		}
 	}
 	n.reConnectAddrs = make([]string, len(dst))
 	copy(n.reConnectAddrs, dst)

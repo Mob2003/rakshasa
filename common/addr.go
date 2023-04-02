@@ -4,7 +4,8 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
-	"github.com/dlclark/regexp2"
+	"regexp"
+
 	"net"
 	"strconv"
 )
@@ -25,68 +26,52 @@ func ParseAddr(str string) (cfg *Addr, err error) {
 		}
 
 	}()
-	r, _ := regexp2.Compile(`^(http://|socks5://)?(\S+):(\S+)@(\S+):(\d+)`, 0)
-	m, err := r.FindStringMatch(str)
-	if err != nil {
-		return nil, errors.New("配置解析错误，" + err.Error())
-	}
+	r, _ := regexp.Compile(`^(http://|socks5://)?(\S+):(\S+)@(\S+):(\d+)`)
+	m := r.FindAllStringSubmatch(str, 1)
+
 	if m != nil {
-		var res_v []string
-		for _, v := range m.Groups() {
-			res_v = append(res_v, v.String())
-		}
-		addr, err := net.ResolveTCPAddr("tcp", res_v[4]+":"+res_v[5])
+
+		addr, err := net.ResolveTCPAddr("tcp", m[0][4]+":"+m[0][5])
 		if err != nil {
-			return nil, errors.New("配置解析错误 " + res_v[4] + ":" + res_v[5] + " 不是有效的 地址:端口")
+			return nil, errors.New("配置解析错误 " + m[0][4] + ":" + m[0][5] + " 不是有效的 地址:端口")
 		}
 		return &Addr{
-			scheam: res_v[1],
-			user:   res_v[2],
-			passwd: res_v[3],
-			ip:     res_v[4],
+			scheam: m[0][1],
+			user:   m[0][2],
+			passwd: m[0][3],
+			ip:     m[0][4],
 			port:   addr.Port,
 		}, nil
 	}
-	r, _ = regexp2.Compile(`^(http://|socks5://)?(\S+):(\S+)@(\d+)`, 0)
-	m, err = r.FindStringMatch(str)
-	if err != nil {
-		return nil, errors.New("配置解析错误，" + err.Error())
-	}
-	if m != nil {
-		var res_v []string
-		for _, v := range m.Groups() {
-			res_v = append(res_v, v.String())
-		}
-		port, _ := strconv.Atoi(res_v[4])
+	r, _ = regexp.Compile(`^(http://|socks5://)?(\S+):(\S+)@(\d+)`)
+	m = r.FindAllStringSubmatch(str, 1)
 
+	if m != nil {
+
+		port, _ := strconv.Atoi(m[0][4])
 		return &Addr{
-			scheam: res_v[1],
-			user:   res_v[2],
-			passwd: res_v[3],
+			scheam: m[0][1],
+			user:   m[0][2],
+			passwd: m[0][3],
 			ip:     "",
 			port:   port,
 		}, nil
 	}
-	r, _ = regexp2.Compile(`^(http://|socks5://)?(\S+):(\S+)$`, 0)
-	m, err = r.FindStringMatch(str)
-	if err != nil {
-		return nil, errors.New("配置解析错误，" + err.Error())
-	}
+	r, _ = regexp.Compile(`^(http://|socks5://)?(\S+):(\S+)$`)
+	m = r.FindAllStringSubmatch(str, 1)
+
 	if m != nil {
-		var res_v []string
-		for _, v := range m.Groups() {
-			res_v = append(res_v, v.String())
-		}
-		addr, err := net.ResolveTCPAddr("tcp", res_v[2]+":"+res_v[3])
+
+		addr, err := net.ResolveTCPAddr("tcp", m[0][2]+":"+m[0][3])
 		if err != nil {
-			return nil, errors.New("配置解析错误 " + res_v[1] + ":" + res_v[2] + " 不是有效的 地址:端口")
+			return nil, errors.New("配置解析错误 " + m[0][1] + ":" + m[0][2] + " 不是有效的 地址:端口")
 		}
 
 		return &Addr{
-			scheam: res_v[1],
+			scheam: m[0][1],
 			user:   "",
 			passwd: "",
-			ip:     res_v[2],
+			ip:     m[0][2],
 			port:   addr.Port,
 		}, nil
 	}

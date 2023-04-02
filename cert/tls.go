@@ -8,22 +8,25 @@ import (
 	_ "embed"
 	"encoding/base64"
 	"encoding/pem"
-	"github.com/farmerx/gorsa"
+
 	"log"
+
+	"github.com/farmerx/gorsa"
 )
 
 //go:embed server.crt
 var rsaCert []byte
 
 //go:embed  server.key
-var PrivateKey []byte
+var RsaPrivateKey []byte
 
 var Tlsconfig *tls.Config
 
 func init() {
+
 	//内置证书
 
-	cert, err := tls.X509KeyPair(rsaCert, PrivateKey)
+	cert, err := tls.X509KeyPair(rsaCert, RsaPrivateKey)
 	if err != nil {
 		log.Panicln(err)
 		return
@@ -59,7 +62,6 @@ func init() {
 
 //go:embed  public.pem
 var publicKey []byte
-
 
 var privateKey []byte
 
@@ -103,7 +105,7 @@ func RSAEncrypterByPrivByte(msg []byte) []byte {
 	prienctypt, _ := gorsa.RSA.PriKeyENCTYPT([]byte(msg))
 	return prienctypt
 }
-func RSADecrypterByPub(cipherText string) string{
+func RSADecrypterByPub(cipherText string) string {
 	b, _ := base64.StdEncoding.DecodeString(cipherText)
 	pubdecrypt, _ := gorsa.RSA.PubKeyDECRYPT(b)
 	return string(pubdecrypt)
@@ -112,7 +114,19 @@ func RSADecrypterByPubByte(cipherText []byte) []byte {
 	pubdecrypt, _ := gorsa.RSA.PubKeyDECRYPT(cipherText)
 	return pubdecrypt
 }
-func init(){
-	gorsa.RSA.SetPublicKey(string(publicKey))
-	gorsa.RSA.SetPrivateKey(string(privateKey))
+func init() {
+	if err := gorsa.RSA.SetPublicKey(string(publicKey)); err != nil {
+		log.Fatalln("无法加载publicKey，请检查public.pem")
+	}
+	if len(privateKey) > 0 {
+		//fullnode
+		if err := gorsa.RSA.SetPrivateKey(string(privateKey)); err != nil {
+			log.Fatalln("无法加载privateKey，请检查private.go")
+		}
+		test := "hello world"
+		if RSADecrypterByPub(RSAEncrypterByPriv(test)) != test {
+			log.Fatalln("当前内置的public.pem 与 private.pem 无法正常加密解密")
+		}
+	}
+
 }
