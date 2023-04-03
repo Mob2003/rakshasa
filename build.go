@@ -45,7 +45,7 @@ func main() {
 				return
 			}
 		} else {
-			b, err := exec.Command("/bin/bash", "-c", "cd gencert && go run main.go").CombinedOutput()
+			_, err := exec.Command("/bin/bash", "-c", "cd gencert && go run main.go").CombinedOutput()
 			if err != nil {
 				log.Fatal(`无法生成证书，请手动执行"cd gencert && go run main.go"`)
 				return
