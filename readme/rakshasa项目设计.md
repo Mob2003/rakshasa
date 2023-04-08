@@ -42,7 +42,6 @@ rakshasa是一个用Go编写的程序，旨在创建一个能够实现**多级�
  ├── cert      //证书存放目录，使用embed内嵌到二进制文件
  ├── common    //协议编码格式与配置文件
  ├── gencert   //go实现的证书生成，可以生成临时证书
- ├── httppool  //http代理池检测相关
  ├── readline  //二开以实现更强大的交互式CLI
  ├── readme    //使用文档
  ├── server    //核心代码
@@ -62,7 +61,7 @@ rakshasa是一个用Go编写的程序，旨在创建一个能够实现**多级�
         ├──shellcode.go                 //执行shellcode
         ├──shellcode_linux.go           //暂未实现
         ├──shellcode_windows.go         //windows下执行shellcode
-        ├──socks5.go                    //socks5正向代理
+        └──socks5.go                    //socks5正向代理
 ├── main.go
 ├── config.yaml
 ├── go.mod
@@ -74,12 +73,12 @@ rakshasa是一个用Go编写的程序，旨在创建一个能够实现**多级�
 程序启动时需指定-f参数来读取YML文件：
 
 ```yaml
+uuid: 6a709110-b8f9-477d-83fb-093e66a93405  #本地节点的uuid，为空则使用mac生成
 dstnode:
     - 192.168.1.180:8883 #可以留空，上级节点的ip端口，rakshasa没有公共节点也不会自动发现节点，需要config指定或者启动后使用命令连接其他节点
 password: ""                  #通讯秘钥，可以额外指定秘钥，各节点除了证书需要匹配之外，秘钥也需要相同，避免二进制泄漏后被别人无脑连接
 port: 8883                     #监听端口
-listenip:                         #外网ip，当某个节点掉线后，会尝试连接这个ip
-    - 192.168.1.151
+listenip: 137.220.171.27    #外网ip，当某个节点掉线后，会尝试连接这个ip
 limit: false                      #节点掉线后的行为模式，为ture的时候，只连接dstnode指定的ip，不会连接其他节点；为false的时候，尝试连接所有已记录节点的listenip与port
 filename: config.yaml    #yaml的文件名，执行保存config命令的时候，会将配置写入这个文件
 ```
@@ -177,6 +176,15 @@ filename: config.yaml    #yaml的文件名，执行保存config命令的时候�
 - -shellcode                string
   
        与-d配合指定节点执行shellcode,-d参数为空则为本节点执行，可以为base64或者hex编码
+       
+
+- -uuid                string
+
+      以指定的uuid作为本节点id进行启动，留空则使用网卡mac生成
+
+- -randomUUID                bool    
+
+      生成一个随机的uuid作为本节点uuid
 
 ## 7. 带参数启动使用例子
 
