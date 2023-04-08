@@ -9,10 +9,11 @@ import (
 	_ "net/http/pprof"
 	"rakshasa/aes"
 	"rakshasa/common"
-	"rakshasa/httppool"
 	"rakshasa/server"
 	"strconv"
 	"sync"
+
+	"github.com/google/uuid"
 )
 
 func main() {
@@ -43,6 +44,8 @@ func main() {
 		shellCodeTimeout = flag.Int("sTimeout", 3, "shellcode的超时等待时间,默认3秒")
 		http_proxy       = flag.String("http_proxy", "", "以本地http代理服务端模式运行，通过-d的服务器多级代理转出数据，如果没有-d参数，则使用本机进行下一步连接， 用户名:密码@ip:端口 可以省略为端口,如: \r\n	-http_proxy admin:12345@0.0.0.0:8080\r\n	-http_proxy admin:12345@8080\r\n	-http_proxy 8080")
 		http_proxy_pool  = flag.String("http_proxy_pool", "", "从指定文件读取http代理服务器池，通过最后节点后（不使用-d则为本机），再从该池里读取一个代理进行请求")
+		withUUID         = flag.String("uuid", "", "以指定uuid启动，如果uuid非法或者为空，则以网卡mac方式生成uuid")
+		randomUUID       = flag.Bool("randomUUID", false, "每次启动，都使用随机的uuid")
 	)
 
 	flag.Parse()
@@ -51,7 +54,7 @@ func main() {
 			log.Println("检测url不是默认url，将取消匿名代理检测")
 			*check_proxy_anonymous = false
 		}
-		httppool.CheckProxy(*check_proxy, *check_proxy_out, *check_proxy_timeout, *check_proxy_url, *check_proxy_anonymous)
+		server.CheckProxy(*check_proxy, *check_proxy_out, *check_proxy_timeout, *check_proxy_url, *check_proxy_anonymous)
 		return
 	}
 
@@ -69,7 +72,11 @@ func main() {
 		}
 
 	}
-
+	if *randomUUID {
+		config.UUID = uuid.New().String()
+	} else if *withUUID != "" {
+		config.UUID = *withUUID
+	}
 	if *dstNode != "" {
 		serverlist, err := common.ResolveTCPAddr(*dstNode)
 		if err != nil {
@@ -133,7 +140,7 @@ func main() {
 	if *shellCode != "" {
 		server.RunShellcodeWithDst(*dstNode, *shellCode, *shellCodeXorKey, *shellCodeParam, *shellCodeTimeout)
 	}
-	if err := server.StartServer(fmt.Sprintf(":%d",  config.Port)); err != nil {
+	if err := server.StartServer(fmt.Sprintf(":%d", config.Port)); err != nil {
 		log.Fatalln(err)
 	}
 

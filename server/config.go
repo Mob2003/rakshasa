@@ -1,9 +1,11 @@
 package server
 
 import (
-	"gopkg.in/yaml.v3"
 	"io/ioutil"
 	"rakshasa/common"
+
+	"github.com/google/uuid"
+	"gopkg.in/yaml.v3"
 )
 
 var currentConfig common.Config
@@ -13,6 +15,12 @@ func SetConfig(config common.Config) {
 	currentConfig.FileSave = false
 	currentNode.mainIp = currentConfig.ListenIp
 	currentNode.port = currentConfig.Port
+	if id, err := uuid.Parse(currentConfig.UUID); err != nil {
+		currentConfig.UUID = common.GetUUIDFromInterfaceMac()
+	}else{
+		currentConfig.UUID=id.String()
+	}
+	currentNode.uuid = currentConfig.UUID
 }
 func ConfigSave() error {
 	b, _ := yaml.Marshal(currentConfig)

@@ -16,6 +16,8 @@ import (
 	"rakshasa/aes"
 	"rakshasa/common"
 
+	"github.com/google/uuid"
+
 	"regexp"
 	"runtime"
 	"strconv"
@@ -134,8 +136,8 @@ func init() {
 			currentConfig.Port = port
 			currentNode.port = port
 			currentConfig.FileSave = false
-			if err := StartServer(fmt.Sprintf(":%d",  currentConfig.Port)); err != nil {
-				c.Printf("启动节点失败 %v, 请重新修改监听端口",currentConfig.Port)
+			if err := StartServer(fmt.Sprintf(":%d", currentConfig.Port)); err != nil {
+				c.Printf("启动节点失败 %v, 请重新修改监听端口", currentConfig.Port)
 			}
 		},
 	})
@@ -179,7 +181,24 @@ func init() {
 			currentConfig.FileSave = false
 		},
 	})
+	configShell.AddCmd(&ishell.Cmd{
+		Name: "uuid",
+		Help: "修改本节点UUID设置，使用方法uuid 字串符",
+		Func: func(c *ishell.Context) {
+			if len(c.Args) != 1 {
+				c.Println("参数错误")
+				return
+			}
+			if id, err := uuid.Parse(c.Args[0]); err == nil {
+				currentConfig.UUID = id.String()
+				currentConfig.FileSave = false
+				SetConfig(currentConfig)
+			} else {
+				c.Println("输入的uuid不是合法的uuid，建议使用xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx")
+			}
 
+		},
+	})
 	rootCli.AddCmd(&ishell.Cmd{
 		Name: "config",
 		Help: "配置管理",
@@ -553,7 +572,7 @@ func init() {
 				return
 			}
 			for _, addr := range strings.Split(c.Args[0], ",") {
-				_, err := connectNew(addr)
+				_, err := getNode(addr)
 				if err != nil {
 					c.Println("连接", addr, "失败", err)
 					return
@@ -788,46 +807,26 @@ func printConn() {
 	})
 }
 func getNode(arg string) (*node, error) {
-	l := clientLock.RLock()
-
+	l := clientLock.Lock()
+	defer l.Unlock()
 	id, err := strconv.Atoi(arg)
-
 	if err == nil {
 		for _, n := range nodeMap {
-			if n.id == id && n.uuid != currentNode.uuid {
-				l.RUnlock()
+			if n.id == id  {
 				return n, nil
 			}
 		}
 	} else {
-		if v, ok := nodeMap[arg]; ok && v.uuid != currentNode.uuid {
-			l.RUnlock()
-			return v, nil
-		}
-	}
-	l.RUnlock()
-
-	return connectNew(arg)
-}
-func getNodeWithCurrentNode(arg string) (*node, error) {
-	l := clientLock.RLock()
-
-	id, err := strconv.Atoi(arg)
-
-	if err == nil {
-		for _, n := range nodeMap {
-			if n.id == id {
-				l.RUnlock()
-				return n, nil
+		for _, node := range nodeMap {
+			if fmt.Sprintf("%s:%d", node.mainIp, node.port) == arg {
+				return node, nil
+			} else if fmt.Sprintf("%s:%d", node.addr, node.port) == arg {
+				return node, nil
+			} else if node.uuid == arg {
+				return node, nil
 			}
 		}
-	} else {
-		if v, ok := nodeMap[arg]; ok {
-			l.RUnlock()
-			return v, nil
-		}
 	}
-	l.RUnlock()
-
 	return connectNew(arg)
 }
+

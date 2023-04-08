@@ -18,6 +18,12 @@ func (l *serverListen) Lisen() {
 
 			continue
 		}
+		if l.node.isClose == 1 {
+			newNode, _ := getNode(l.node.uuid)
+			if newNode != nil {
+				l.node = newNode
+			}
+		}
 
 		conn := &serverConnect{}
 		conn.conn = c
@@ -27,7 +33,7 @@ func (l *serverListen) Lisen() {
 
 		if l.isSocks5 {
 			conn.id = l.id
-			l.node.Write(common.CMD_CONNECT_BYIDADDR_RESULT, l.replayid, append(l.randkey,l.socks5Replay...))
+			l.node.Write(common.CMD_CONNECT_BYIDADDR_RESULT, l.replayid, append(l.randkey, l.socks5Replay...))
 			go conn.handTcpReceive()
 			return
 		}
@@ -38,7 +44,7 @@ func (l *serverListen) Lisen() {
 		b[1] = byte(conn.id >> 8)
 		b[2] = byte(conn.id >> 16)
 		b[3] = byte(conn.id >> 24)
-		conn.node.Write(common.CMD_CONNECT_BYID, l.id, append(l.randkey,b...))
+		conn.node.Write(common.CMD_CONNECT_BYID, l.id, append(l.randkey, b...))
 		l.connMap.Store(conn.id, conn)
 		go conn.handTcpReceive()
 

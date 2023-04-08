@@ -1,18 +1,20 @@
 package server
 
 import (
+	"bufio"
 	"bytes"
+	"cert"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"hash/crc32"
+	"io"
 	"log"
 	"math/rand"
 	"net"
 	"net/url"
 	"os"
-	"cert"
 	"rakshasa/common"
-	"rakshasa/httppool"
 	"runtime/debug"
 	"strconv"
 	"strings"
@@ -27,7 +29,7 @@ const CheckProxyUrl = "https://myip.fireflysoft.net/"
 
 type httpProxyClient struct {
 	windowsSize int64
-	isclose     int32
+	status      int32
 	conn        net.Conn
 	udpconn     net.Conn
 
@@ -40,10 +42,9 @@ type httpProxyClient struct {
 	udpMap     sync.Map
 	listenId   uint32
 	localAddr  string
-	isConnect  bool
 	method     string
 	cfg        *common.Addr
-	pool       *httppool.HttpPool
+	pool       *httpPool
 	remoteAddr string
 	remotePort string
 	randkey    []byte
@@ -68,7 +69,9 @@ func (s *httpProxyClient) Write(b []byte) {
 
 			if b[10] != 1 {
 				//重新拉取一个池
-				s.connect()
+				if !s.connect() {
+					s.Close(nodeIsClose)
+				}
 			} else if s.method == "CONNECT" {
 				s.conn.Write([]byte("HTTP/1.0 200 Connection established\r\n\r\n"))
 			}
@@ -90,7 +93,7 @@ func (s *httpProxyClient) Write(b []byte) {
 }
 
 func (s *httpProxyClient) Close(msg string) {
-	if atomic.CompareAndSwapInt32(&s.isclose, 0, 1) {
+	if atomic.CompareAndSwapInt32(&s.status, CONN_STATUS_CONNECT, CONN_STATUS_NONE) {
 
 		<-s.wait
 		s.wait <- common.CONN_STATUS_CLOSE
@@ -147,10 +150,10 @@ func (s *httpProxyClient) Addwindow(window int64) {
 }
 
 func StartHttpProxy(cfg *common.Addr, dst []string, poolfile string) error {
-	var pool *httppool.HttpPool
+	var pool *httpPool
 	var err error
 	if poolfile != "" {
-		pool, err = httppool.HttpPoolInit(poolfile)
+		pool, err = httpPoolInit(poolfile)
 		if err != nil {
 			return err
 		}
@@ -183,7 +186,7 @@ func StartHttpProxy(cfg *common.Addr, dst []string, poolfile string) error {
 	currentNode.listenMap.Store(l.id, l)
 	return nil
 }
-func StartHttpProxyWithServer(cfg *common.Addr, n *node, id uint32, pool *httppool.HttpPool) (net.Listener, error) {
+func StartHttpProxyWithServer(cfg *common.Addr, n *node, id uint32, pool *httpPool) (net.Listener, error) {
 	l, err := net.Listen("tcp", cfg.Addr())
 	if err != nil {
 		return nil, err
@@ -280,20 +283,23 @@ func handleHttpProxyLocal(s *httpProxyClient) {
 					s.remoteAddr = u.Host
 					s.remotePort = "80"
 				}
-				s.connect()
-				buf := bufPool.Get().(*bytes.Buffer)
-				buf.Reset()
-				buf.WriteString("GET ")
-				buf.WriteString(req.uri)
-				buf.WriteString(" HTTP/1.1\r\n")
-				for _, header := range req.header {
-					buf.WriteString(header)
+				if s.connect() {
+					buf := bufPool.Get().(*bytes.Buffer)
+					buf.Reset()
+					buf.WriteString("GET ")
+					buf.WriteString(req.uri)
+					buf.WriteString(" HTTP/1.1\r\n")
+					for _, header := range req.header {
+						buf.WriteString(header)
+						buf.WriteString("\r\n")
+					}
 					buf.WriteString("\r\n")
+					s.write2connect(buf.Bytes())
+					buf.Reset()
+					bufPool.Put(buf)
+				} else {
+					s.Close(nodeIsClose)
 				}
-				buf.WriteString("\r\n")
-				s.write2connect(buf.Bytes())
-				buf.Reset()
-				bufPool.Put(buf)
 
 			} else {
 				return
@@ -303,7 +309,9 @@ func handleHttpProxyLocal(s *httpProxyClient) {
 			if i := strings.IndexByte(req.uri, ':'); i > -1 {
 				s.remoteAddr = req.uri[:i]
 				s.remotePort = req.uri[i+1:]
-				s.connect()
+				if !s.connect() {
+					s.Close(nodeIsClose)
+				}
 			} else {
 				return
 			}
@@ -349,9 +357,8 @@ func (s *httpProxyClient) write2connect(data []byte) {
 	}
 	s.server.Write(common.CMD_CONN_MSG, s.id, append(outdata, data...))
 }
-func (s *httpProxyClient) connect() {
-	if !s.isConnect {
-
+func (s *httpProxyClient) connect() bool {
+	if !s.checkConnect() {
 		buf := make([]byte, 2+len(s.remoteAddr)+len(s.remotePort))
 		s.id = s.server.storeConn(s)
 		buf[0] = byte(common.RAW_TCP)
@@ -365,7 +372,7 @@ func (s *httpProxyClient) connect() {
 			buf = append(buf, []byte(" "+proxy.String())...)
 		}
 
-		s.server.Write(common.CMD_CONNECT_BYIDADDR, s.id, cert.RSAEncrypterByPrivByte(append(s.randkey,buf...)))
+		s.server.Write(common.CMD_CONNECT_BYIDADDR, s.id, cert.RSAEncrypterByPrivByte(append(s.randkey, buf...)))
 		if value, ok := s.server.listenMap.Load(s.listenId); ok {
 			switch v := value.(type) {
 			case *serverListen:
@@ -374,11 +381,22 @@ func (s *httpProxyClient) connect() {
 				v.connMap.Store(s.id, s)
 			}
 		}
-		s.isConnect = true
+		s.status = CONN_STATUS_CONNECT
+		return true
 	}
-
+	return s.server.isClose == 0
 }
 
+// 检查一下server是否断开，尝试重连，返回是否连接
+func (s *httpProxyClient) checkConnect() bool {
+	if s.server.isClose == 1 {
+		//尝试重连
+		if newNode, _ := GetNodeFromAddrs(s.server.reConnectAddrs); newNode != nil {
+			s.server = newNode
+		}
+	}
+	return s.status == CONN_STATUS_CONNECT
+}
 func (s *httpProxyClient) Remoteclose() {
 
 	s.close = "本地要求远程关闭"
@@ -388,7 +406,7 @@ func (s *httpProxyClient) Remoteclose() {
 	buf[1] = byte(s.id >> 8)
 	buf[2] = byte(s.id >> 16)
 	buf[3] = byte(s.id >> 24)
-	s.server.Write(common.CMD_DELETE_LISTENCONN_BYID, s.listenId, append(s.randkey,buf...))
+	s.server.Write(common.CMD_DELETE_LISTENCONN_BYID, s.listenId, append(s.randkey, buf...))
 
 }
 func init() {
@@ -610,4 +628,54 @@ func parsereq(req *http1request, data []byte) (clen int, resdata []byte, err err
 	}
 
 	return 0, nil, nil
+}
+type httpPool struct {
+	r *bufio.Reader
+	f *os.File
+	sync.Mutex
+}
+
+func httpPoolInit(file string) (*httpPool, error) {
+	f, err := os.Open(file)
+	if err != nil {
+		return nil, fmt.Errorf("打开http代理池文件 %s 失败", file)
+	}
+	p := &httpPool{
+		r:     bufio.NewReader(f),
+		f:     f,
+		Mutex: sync.Mutex{},
+	}
+	if _, err = p.do_next(0); err != nil {
+		return nil, fmt.Errorf("无法从%s文件获取代理，错误%v", file, err)
+	}
+	return p, nil
+}
+func (p *httpPool) Next() *common.Addr {
+	addr, _ := p.do_next(0)
+	return addr
+}
+func (p *httpPool) do_next(n int) (*common.Addr, error) {
+	if n > 100 {
+		return nil, errors.New("重试错误次数过多")
+	}
+	p.Lock()
+	line, err := p.r.ReadString(10)
+	if err == io.EOF {
+		p.f.Seek(0, 0)
+		p.r.Reset(p.f)
+		p.Unlock()
+		return p.do_next(n + 1)
+	}
+	p.Unlock()
+	line = strings.TrimRight(line, "\n")
+	line = strings.TrimRight(line, "\r")
+
+	if len(line) == 0 {
+		return p.do_next(n + 1)
+	}
+	addr, err := common.ParseAddr(line)
+	if err != nil {
+		return p.do_next(n + 1)
+	}
+	return addr, nil
 }

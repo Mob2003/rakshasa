@@ -17,7 +17,6 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
-	"unsafe"
 
 	"github.com/luyu6056/ishell"
 )
@@ -29,9 +28,9 @@ const (
 )
 
 var (
-	SOCKES5_AUTH_SUSSCES   []byte = []byte{5, 0}
+	SOCKES5_AUTH_SUSSCES        []byte = []byte{5, 0}
 	SOCKES5_AUTH_SUSSCES_PASSWD []byte = []byte{5, 2}
-	PROTOCOL_ERR = errors.New("protocolErr")
+	PROTOCOL_ERR                       = errors.New("protocolErr")
 )
 
 const (
@@ -44,10 +43,15 @@ const (
 	CONN_REMOTE_OPEN  = 1
 )
 
+const (
+	CONN_STATUS_NONE = iota
+	CONN_STATUS_CONNECT
+)
+
 type clientConnect struct {
 	cfg         *common.Addr
 	windowsSize int64
-	isClose     int32
+	status      int32
 	conn        net.Conn
 	udpConn     net.Conn
 
@@ -109,9 +113,9 @@ func (s *clientConnect) Write(b []byte) {
 
 var remoteClose = "服务器要求远程关闭"
 var nodeIsClose = "节点已经断开连接"
-func (s *clientConnect) Close(msg string) {
-	if atomic.CompareAndSwapInt32(&s.isClose, 0, 1) {
 
+func (s *clientConnect) Close(msg string) {
+	if atomic.CompareAndSwapInt32(&s.status, CONN_STATUS_CONNECT, CONN_STATUS_NONE) {
 		<-s.wait
 		s.wait <- common.CONN_STATUS_CLOSE
 		s.auth = CONN_AUTH_CLOSE
@@ -302,12 +306,12 @@ func handleSocks5Local(s *clientConnect) {
 			switch common.NetWork(data[1]) {
 			case common.SOCKS5_CMD_CONNECT:
 				addr, port := socks5ReadAddr(data)
-				if !s.connect(common.SOCKS5_CMD_CONNECT, addr, port){
+				if !s.connect(common.SOCKS5_CMD_CONNECT, addr, port) {
 					s.Close(nodeIsClose)
 				}
 			case common.SOCKS5_CMD_BIND:
 				addr, port := socks5ReadAddr(data)
-				if !s.connect(common.SOCKS5_CMD_BIND, addr, port){
+				if !s.connect(common.SOCKS5_CMD_BIND, addr, port) {
 					s.Close(nodeIsClose)
 				}
 			case common.SOCKS5_CMD_UDP:
@@ -336,11 +340,11 @@ func handleSocks5Local(s *clientConnect) {
 				ipb := ipToByte(localIP)
 				addr, port := socks5ReadAddr(data)
 
-				if s.connect(common.SOCKS5_CMD_UDP, addr, port){
+				if s.connect(common.SOCKS5_CMD_UDP, addr, port) {
 					copy(repdata[4:], ipb)
 					s.conn.Write(repdata)
 					go handleSocks5Udp(s)
-				}else{
+				} else {
 					s.Close(nodeIsClose)
 				}
 			default:
@@ -401,7 +405,7 @@ func handleSocks5Udp(s *clientConnect) {
 			if v, ok := s.udpMap.Load(ip); !ok {
 
 				udps := &clientConnect{
-					server: s.server,
+					server:  s.server,
 					randkey: s.randkey,
 				}
 				udps.udpConn = s.udpConn
@@ -426,34 +430,38 @@ func handleSocks5Udp(s *clientConnect) {
 	}
 
 }
-func (s *clientConnect) connect(command common.NetWork, addr string, port uint16)bool {
-	if atomic.LoadInt32(&s.server.isClose) == 1 {
+func (s *clientConnect) connect(command common.NetWork, addr string, port uint16) bool {
+	if !s.checkConnect() {
 		s.server, _ = GetNodeFromAddrs(s.server.reConnectAddrs)
+		ports := strconv.Itoa(int(port))
+		buf := make([]byte, 2+len(addr)+len(ports))
+		s.id = s.server.storeConn(s)
+		buf[0] = byte(command)
+		copy(buf[1:], addr)
+		buf[1+len(addr)] = ':'
+		copy(buf[2+len(addr):], ports)
+		s.server.Write(common.CMD_CONNECT_BYIDADDR, s.id, cert.RSAEncrypterByPrivByte(append(s.randkey, buf...)))
+		if value, ok := s.server.listenMap.Load(s.listenId); ok {
+			switch v := value.(type) {
+			case *serverListen:
+				v.connMap.Store(s.id, s)
+			case *clientListen:
+				v.connMap.Store(s.id, s)
+			}
+		}
+		s.status = CONN_STATUS_CONNECT
+		return true
 	}
-	if atomic.LoadInt32(&s.server.isClose) == 1 {
-		return false
-	}
-	ports := strconv.Itoa(int(port))
-	buf := make([]byte, 2+len(addr)+len(ports))
-	s.id = s.server.storeConn(s)
-	buf[0] = byte(command)
-	copy(buf[1:], addr)
-	buf[1+len(addr)] = ':'
-	copy(buf[2+len(addr):], ports)
-	s.server.Write(common.CMD_CONNECT_BYIDADDR, s.id, cert.RSAEncrypterByPrivByte(append(s.randkey, buf...)))
-	if value, ok := s.server.listenMap.Load(s.listenId); ok {
-		switch v := value.(type) {
-		case *serverListen:
-			v.connMap.Store(s.id, s)
-		case *clientListen:
-			v.connMap.Store(s.id, s)
+	return s.server.isClose == 0
+}
+func (s *clientConnect) checkConnect() bool {
+	if s.server.isClose == 1 {
+		//尝试重连
+		if newNode, _ := GetNodeFromAddrs(s.server.reConnectAddrs); newNode != nil {
+			s.server = newNode
 		}
 	}
-	return true
-}
-
-func Bytes2str(b []byte) string {
-	return *(*string)(unsafe.Pointer(&b))
+	return s.status == CONN_STATUS_CONNECT
 }
 
 func (s *clientConnect) Remoteclose() {

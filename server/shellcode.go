@@ -1,6 +1,7 @@
 package server
 
 import (
+	"cert"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
@@ -10,7 +11,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"cert"
 	"rakshasa/common"
 	"strconv"
 	"time"
@@ -28,7 +28,7 @@ type ShellCodeStruct struct {
 func RunShellcodeWithDst(dst, shellcode, xorKey, param string, timeout int) error {
 
 	if dst != "" {
-		n, err := getNodeWithCurrentNode(dst)
+		n, err := getNode(dst)
 		if err != nil {
 			return fmt.Errorf("无法链接节点%s,错误%v", dst, err)
 		}

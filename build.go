@@ -34,7 +34,9 @@ func main() {
 	if *genfullNodePrivate {
 		b, _ := os.ReadFile("./cert/private.pem")
 		data := fmt.Sprintf("package cert\r\n func init(){\r\nprivateKey=%#v\r\n}\r\n", b)
-		os.WriteFile("./cert/private.go", []byte(data), 0655)
+		if err := os.WriteFile("./cert/private.go", []byte(data), 0655); err != nil {
+			fmt.Printf("写入./cert/private.go失败，错误 %v", err)
+		}
 		return
 	}
 	if *gencert {

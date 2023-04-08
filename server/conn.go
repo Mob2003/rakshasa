@@ -40,8 +40,7 @@ type Conn struct {
 	close         chan string
 	isClient      bool
 	nodeConn      *tls.Conn
-	regResult     chan error
-	regResultNode chan *node
+	regResult     chan RegMsg
 }
 
 type serverListen struct {
@@ -544,7 +543,7 @@ func (c *Conn) handlerNodeRead() {
 									}
 								}
 							case <-time.After(common.CMD_TIMEOUT):
-								newNode.Delete("超时")
+								newNode.Close("超时")
 							}
 						}()
 
@@ -660,6 +659,7 @@ func (c *Conn) handle() {
 						if common.Debug {
 							fmt.Println(c.nodeConn.RemoteAddr().String(), "关闭原因", reason)
 						}
+
 						if c.nodeConn != nil {
 							if common.Debug {
 								fmt.Println("執行close1")
@@ -668,12 +668,16 @@ func (c *Conn) handle() {
 						}
 
 						if c.node != nil {
+							c.node.Close(reason)
 							//移除上游连接
 							for i := len(upLevelNode) - 1; i >= 0; i-- {
 								n := upLevelNode[i]
 								if n.uuid == c.node.uuid {
 									upLevelNode = append(upLevelNode[:i], upLevelNode[i+1:]...)
 								}
+							}
+							if common.Debug {
+								fmt.Println("upLevelNode",len(upLevelNode))
 							}
 						}
 
@@ -690,7 +694,7 @@ func (c *Conn) handle() {
 func (c *Conn) reg() error {
 
 	var err error
-	reg := &common.RegMsg{
+	reg := &RegMsg{
 		UUID:     currentNode.uuid,
 		MainIp:   cert.RSAEncrypterStr(currentNode.mainIp),
 		Port:     cert.RSAEncrypterStr(strconv.Itoa(currentNode.port)),

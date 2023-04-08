@@ -57,7 +57,7 @@ func cliInit() *ishell.Shell {
 				return
 			}
 			for _, addr := range strings.Split(c.Args[0], ",") {
-				_, err := connectNew(addr)
+				_, err := getNode(addr)
 				if err != nil {
 					c.Println("连接", addr, "失败", err)
 					return
@@ -102,6 +102,23 @@ func cliInit() *ishell.Shell {
 				n, ok := nodeMap[c.Args[0]]
 				if ok {
 					n.Delete("")
+				}
+
+			},
+		})
+		shell.AddCmd(&ishell.Cmd{
+			Name: "closenode",
+			Help: "关闭一个node ID",
+			Func: func(c *ishell.Context) {
+				l := clientLock.Lock()
+				defer l.Unlock()
+				if len(c.Args) != 1 {
+					c.Println("参数不对")
+					return
+				}
+				n, ok := nodeMap[c.Args[0]]
+				if ok {
+					n.Close("debug关闭")
 				}
 
 			},

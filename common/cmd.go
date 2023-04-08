@@ -2,12 +2,14 @@ package common
 
 import (
 	"bytes"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"math/rand"
 	"net"
 	"rakshasa/aes"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -195,17 +197,6 @@ func init() {
 
 }
 
-type RegMsg struct {
-	UUID     string //当前机器uuid
-	RegAddr  string //远程连接的addr
-	Hostname string //当前机器名称
-	Goos     string
-	ViaUUID  string
-	Err      string
-	MainIp   string
-	Port     string
-}
-
 var msgId uint32
 
 func (m *Msg) Marshal() []byte {
@@ -328,4 +319,32 @@ func ResolveTCPAddr(str string) ([]string, error) {
 	}
 
 	return dst, nil
+}
+func GetUUIDFromInterfaceMac() string {
+	ifts, _ := net.Interfaces()
+	for _, ift := range ifts {
+		if addr := ift.HardwareAddr.String(); len(addr) > 0 {
+			var randSeed = make([]byte, 8)
+			for k, s := range strings.Split(addr, ":") {
+				if k < 8 {
+					n, _ := strconv.ParseUint(s, 16, 8)
+					randSeed[k] = byte(n)
+				}
+
+			}
+			source := rand.NewSource(int64(binary.LittleEndian.Uint64(randSeed)))
+			buf := bytes.NewBuffer(nil)
+			for i := 0; i < 2; i++ {
+				var b = make([]byte, 8)
+				binary.LittleEndian.PutUint64(b, uint64(source.Int63()))
+				buf.Write(b)
+			}
+			id, err := uuid.NewRandomFromReader(buf)
+			if err == nil {
+				return id.String()
+			}
+		}
+
+	}
+	return uuid.New().String()
 }
