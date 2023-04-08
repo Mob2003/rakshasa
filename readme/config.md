@@ -2,7 +2,8 @@
 
 ## yaml文件例子，保存在启动目录下
 
-```
+```yaml
+uuid: 6a709110-b8f9-477d-83fb-093e66a93405
 dstnode:
 - 192.168.1.180:8883
 password: ""
@@ -15,6 +16,7 @@ filename: config.yaml
 
 #### 如果有启动参数将会覆盖掉yaml配置，如-d会覆盖掉dstnode
 
+- uuid 设置本节点uuid，如果填写有误则使用网卡mac生成
 - dstnode 目标服务器   对应启动参数：-d
 - password 传输秘钥    对应启动参数：-password
 - port 本节点监听端口 对应启动参数：-p
