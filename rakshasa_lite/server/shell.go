@@ -74,25 +74,4 @@ func getNode(arg string) (*node, error) {
 
 	return connectNew(arg)
 }
-func getNodeWithCurrentNode(arg string) (*node, error) {
-	l := clientLock.RLock()
 
-	id, err := strconv.Atoi(arg)
-
-	if err == nil {
-		for _, n := range nodeMap {
-			if n.id == id {
-				l.RUnlock()
-				return n, nil
-			}
-		}
-	} else {
-		if v, ok := nodeMap[arg]; ok {
-			l.RUnlock()
-			return v, nil
-		}
-	}
-	l.RUnlock()
-
-	return connectNew(arg)
-}

@@ -1,6 +1,7 @@
 package common
 
 type Config struct {
+	UUID     string   //以指定uuid启动
 	DstNode  []string //-d 上级节点
 	Password string   //通讯密码,可为空
 	Port     int      //默认8883

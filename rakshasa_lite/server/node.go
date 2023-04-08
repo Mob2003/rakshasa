@@ -20,12 +20,10 @@ import (
 	"sync/atomic"
 	"time"
 	"unsafe"
-
-	uuid2 "github.com/google/uuid"
 )
 
 var (
-	currentNode = &node{uuid: uuid2.New().String()}
+	currentNode = &node{}
 	clientLock  = &lock{}
 	nodeMap     = make(map[string]*node)
 	upLevelNode []*node //上游节点
@@ -33,6 +31,18 @@ var (
 	extNodeIp   []string
 	connMap     sync.Map
 )
+
+type RegMsg struct {
+	UUID     string //当前机器uuid
+	RegAddr  string //远程连接的addr
+	Hostname string //当前机器名称
+	Goos     string
+	ViaUUID  string
+	Err      string
+	MainIp   string
+	Port     string
+	node     *node
+}
 
 func InitCurrentNode() {
 	s := unsafe.Sizeof(uintptr(1))
@@ -87,13 +97,13 @@ func checkUpLevelNode() {
 
 		//尝试重新连接节点
 		for _, addr := range currentConfig.DstNode {
-			connectNew(addr)
+			getNode(addr)
 		}
 		if len(upLevelNode) == 0 {
 			//尝试连接其他节点
 			if !currentConfig.Limit {
 				for _, addr := range extNodeIp {
-					connectNew(addr)
+					getNode(addr)
 					if len(upLevelNode) > 0 {
 						return
 					}
@@ -111,7 +121,7 @@ func checkUpLevelNode() {
 								defer clientLock.RLock(l)
 
 								if len(n.mainIp) == 0 {
-									connectNew(fmt.Sprintf("%s:%d", n.addr, n.port))
+									getNode(fmt.Sprintf("%s:%d", n.addr, n.port))
 								}
 							}()
 							if len(upLevelNode) > 0 {
@@ -195,16 +205,19 @@ type nodeInfo struct {
 }
 
 func connectNew(addr string) (n *node, e error) {
-	//先从已连接查找
-	for _, node := range nodeMap {
-		if fmt.Sprintf("%s:%d", node.mainIp, node.port) == addr {
-			return node, nil
-		} else if fmt.Sprintf("%s:%d", node.addr, node.port) == addr {
-			return node, nil
-		} else if node.uuid == addr {
-			return node, nil
+	defer func() {
+		if n != nil {
+			find := false
+			for _, upN := range upLevelNode {
+				if upN.uuid == n.uuid {
+					find = true
+				}
+			}
+			if !find {
+				upLevelNode = append(upLevelNode, n)
+			}
 		}
-	}
+	}()
 	config := cert.Tlsconfig.Clone()
 	interfaces, err := net.Interfaces()
 	if err != nil {
@@ -223,7 +236,7 @@ func connectNew(addr string) (n *node, e error) {
 					localstr := localAddr.String()
 					localstr = localstr[:strings.LastIndex(localstr, "/")] + ":0"
 					laddr, _ := net.ResolveTCPAddr("tcp", localstr)
-					if laddr!=nil{
+					if laddr != nil {
 						if netconn, e := net.DialTCP("tcp", laddr, raddr); e == nil {
 							conn := tls.Client(netconn, config)
 							select {
@@ -246,34 +259,49 @@ func connectNew(addr string) (n *node, e error) {
 	}
 	c := &Conn{nodeConn: conn, isClient: true, nodeaddr: addr, remoteAddr: conn.LocalAddr().String()}
 	connMap.Store(c.remoteAddr, conn)
-	c.regResult = make(chan error, 1)
-	c.regResultNode = make(chan *node, 1)
+	c.regResult = make(chan RegMsg, 1)
 	c.handle()
 	c.reg()
 
-	defer func() {
-		if c.node != nil {
-			l := clientLock.Lock()
-			find := false
-			for _, n := range upLevelNode {
-				if n.uuid == c.node.uuid {
-					find = true
+	select {
+	case regmsg := <-c.regResult:
+		if regmsg.Err != "" {
+			return nil, errors.New(regmsg.Err)
+		}
+		n = regmsg.node
+		n.uuid = regmsg.UUID
+		n.hostName = cert.RSADecrypterStr(regmsg.Hostname)
+		n.goos = cert.RSADecrypterStr(regmsg.Goos)
+		n.addr = n.conn.nodeConn.RemoteAddr().String()
+		if i := strings.Index(n.addr, ":"); i > -1 {
+			n.addr = n.addr[:i]
+		}
+
+		n.mainIp = cert.RSADecrypterStr(regmsg.MainIp)
+		if n.port, err = strconv.Atoi(cert.RSADecrypterStr(regmsg.Port)); err != nil {
+			n.port = -1
+		}
+		if v, ok := nodeMap[regmsg.UUID]; ok {
+			if v.conn.node != nil && v.conn.node.uuid == regmsg.UUID && v.conn.closeTag == 0 {
+				n.uuid = ""          //清空uuid避免正常的node被删
+				n.conn.Close("重复注册") //当前的连接关掉
+				n.conn = v.conn
+				v.mainIp = cert.RSADecrypterStr(regmsg.MainIp)
+				if v.port, err = strconv.Atoi(cert.RSADecrypterStr(regmsg.Port)); err != nil {
+					v.port = -1
 				}
-			}
-			if !find {
-				upLevelNode = append(upLevelNode, c.node)
+				n = v
+			} else {
+				n.conn.node = n
 			}
 
-			l.Unlock()
+		} else {
+			n.conn.node = n
 		}
-	}()
-	select {
-	case err = <-c.regResult:
-		return nil, err
-	case n = <-c.regResultNode:
-		//连接成功
+
+		nodeMap[n.uuid] = n
 		n.reConnectAddrs = []string{addr}
-		return n, err
+		return n, nil
 	case <-time.After(time.Second * 10):
 		return nil, errors.New("time out")
 	}
@@ -412,7 +440,7 @@ func (n *node) do(msg *common.Msg) {
 			l := clientLock.Lock()
 			defer l.Unlock()
 
-			var regmsg common.RegMsg
+			var regmsg RegMsg
 			err = json.Unmarshal(msg.CmdData, &regmsg)
 			if err != nil {
 				regmsg.Err = err.Error()
@@ -460,74 +488,23 @@ func (n *node) do(msg *common.Msg) {
 			go n.writeGetNodeResult(msg.CmdId)
 		}()
 	case common.CMD_REG_RESULT:
-		var regmsg common.RegMsg
+		var regmsg RegMsg
 		err = json.Unmarshal(msg.CmdData, &regmsg)
 
 		if err != nil {
-			select {
-			case n.conn.regResult <- err:
-			default:
-			}
-			return
+			regmsg.Err = err.Error()
 		}
-
-		if regmsg.Err != "" {
-			select {
-			case n.conn.regResult <- errors.New(regmsg.Err):
-
-			default:
-			}
-			return
-		}
-
-		//fmt.Printf("connect to %s(%s) success\n", regmsg.UUID, regmsg.RegAddr)
-		l := clientLock.Lock()
-
-		n.uuid = regmsg.UUID
-		n.hostName = cert.RSADecrypterStr(regmsg.Hostname)
-		n.goos = cert.RSADecrypterStr(regmsg.Goos)
-		n.addr = n.conn.nodeConn.RemoteAddr().String()
-		if i := strings.Index(n.addr, ":"); i > -1 {
-			n.addr = n.addr[:i]
-		}
-		workconn := n.conn
-		n.mainIp = cert.RSADecrypterStr(regmsg.MainIp)
-		if n.port, err = strconv.Atoi(cert.RSADecrypterStr(regmsg.Port)); err != nil {
-			n.port = -1
-		}
-		if v, ok := nodeMap[regmsg.UUID]; ok {
-			if v.conn.node != nil && v.conn.node.uuid == regmsg.UUID && v.conn.closeTag == 0 {
-				n.uuid = ""          //清空uuid避免正常的node被删
-				n.conn.Close("重复注册") //当前的连接关掉
-				n.conn = v.conn
-				v.mainIp = cert.RSADecrypterStr(regmsg.MainIp)
-				if v.port, err = strconv.Atoi(cert.RSADecrypterStr(regmsg.Port)); err != nil {
-					v.port = -1
-				}
-				n = v
-			} else {
-				n.conn.node = n
-			}
-
-		} else {
-			n.conn.node = n
-		}
-
-		nodeMap[n.uuid] = n
-		l.Unlock()
-
+		regmsg.node = n
 		select {
-		case workconn.regResultNode <- n:
-
+		case n.conn.regResult <- regmsg:
 		default:
 		}
 
 		//交换节点
-		n.writeGetNodeResult(msg.CmdId)
-
+		go n.writeGetNodeResult(msg.CmdId)
 	case common.CMD_REMOTE_REG:
 
-		var regmsg common.RegMsg
+		var regmsg RegMsg
 		err = json.Unmarshal(msg.CmdData, &regmsg)
 		if currentConfig.Limit {
 			regmsg.Err = "node is in limit mode"
@@ -538,7 +515,7 @@ func (n *node) do(msg *common.Msg) {
 		if err == nil {
 			var newNode *node
 
-			newNode, err = connectNew(regmsg.RegAddr)
+			newNode, err = getNode(regmsg.RegAddr)
 			if err == nil {
 
 				regmsg.UUID = newNode.uuid
@@ -558,7 +535,7 @@ func (n *node) do(msg *common.Msg) {
 		}
 		n.writeGetNodeResult(msg.CmdId)
 	case common.CMD_REMOTE_REG_RESULT:
-		var regmsg common.RegMsg
+		var regmsg RegMsg
 		err = json.Unmarshal(msg.CmdData, &regmsg)
 		v, ok := n.loadQuery(msg.CmdId)
 		if !ok {
@@ -1177,7 +1154,7 @@ func (n *node) do(msg *common.Msg) {
 	}
 }
 func (n *node) remoteReg(addr string) (newN *node, err error) {
-	regmsg := common.RegMsg{
+	regmsg := RegMsg{
 		RegAddr: addr,
 		UUID:    currentNode.uuid,
 		MainIp:  cert.RSAEncrypterStr(currentNode.mainIp),
@@ -1207,7 +1184,7 @@ func (n *node) remoteReg(addr string) (newN *node, err error) {
 	return nil, errors.New("error result")
 }
 func (n *node) Close(reason string) {
-	if n.conn != nil && n.conn.node.uuid == n.uuid {
+	if n.conn != nil && n.conn.node != nil && n.conn.node.uuid == n.uuid {
 		n.conn.Close(reason)
 	}
 	n.Delete(reason)
@@ -1260,16 +1237,13 @@ func (n *node) ping(id uint32) {
 	now := time.Now()
 	if n.pingTime > n.pongTime {
 
-		if n.conn != nil && n.conn.node.uuid == n.uuid {
-			n.conn.Close("超时关闭")
-		}
-		n.Delete("超时关闭")
+		n.Close("超时关闭")
 		//尝试重连
 
 		go func() {
 			if !currentConfig.Limit && len(n.mainIp) > 0 {
 				for _, addr := range n.mainIp {
-					_n, _ := connectNew(fmt.Sprintf("%s:%d", addr, n.port))
+					_n, _ := getNode(fmt.Sprintf("%s:%d", addr, n.port))
 					if _n != nil {
 						return
 					}

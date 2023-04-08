@@ -39,8 +39,7 @@ type Conn struct {
 	close         chan string
 	isClient      bool
 	nodeConn      *tls.Conn
-	regResult     chan error
-	regResultNode chan *node
+	regResult     chan RegMsg
 }
 
 type serverListen struct {
@@ -531,7 +530,7 @@ func (c *Conn) handlerNodeRead() {
 									}
 								}
 							case <-time.After(common.CMD_TIMEOUT):
-								newNode.Delete("超时")
+								newNode.Close("超时")
 							}
 						}()
 
@@ -626,7 +625,7 @@ func (c *Conn) handle() {
 					}
 				}
 
-			case <-c.close:
+			case reason := <-c.close:
 				c.OutChan = upNodeWrite
 				if c.node != nil && c.node.nextPingTime > time.Now().Unix()+5 {
 					c.node.ping(0)
@@ -646,6 +645,7 @@ func (c *Conn) handle() {
 						}
 
 						if c.node != nil {
+							c.node.Close(reason)
 							//移除上游连接
 							for i := len(upLevelNode) - 1; i >= 0; i-- {
 								n := upLevelNode[i]
@@ -668,7 +668,7 @@ func (c *Conn) handle() {
 func (c *Conn) reg() error {
 
 	var err error
-	reg := &common.RegMsg{
+	reg := &RegMsg{
 		UUID:     currentNode.uuid,
 		MainIp:   cert.RSAEncrypterStr(currentNode.mainIp),
 		Port:     cert.RSAEncrypterStr(strconv.Itoa(currentNode.port)),

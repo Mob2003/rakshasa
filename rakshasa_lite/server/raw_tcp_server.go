@@ -18,6 +18,12 @@ func (l *serverListen) Lisen() {
 
 			continue
 		}
+		if l.node.isClose == 1 {
+			newNode, _ := getNode(l.node.uuid)
+			if newNode != nil {
+				l.node = newNode
+			}
+		}
 
 		conn := &serverConnect{}
 		conn.conn = c
