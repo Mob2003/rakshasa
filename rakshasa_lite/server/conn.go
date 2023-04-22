@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"rakshasa_lite/aes"
 	"rakshasa_lite/common"
+	"runtime/debug"
 	"strconv"
 	"strings"
 	"sync"
@@ -33,13 +34,13 @@ type Conn struct {
 	node     *node
 	nodeaddr string
 	//key              string
-	remoteAddr    string
-	inChan        chan func()
-	OutChan       chan []byte
-	close         chan string
-	isClient      bool
-	nodeConn      *tls.Conn
-	regResult     chan RegMsg
+	remoteAddr string
+	inChan     chan func()
+	OutChan    chan []byte
+	close      chan string
+	isClient   bool
+	nodeConn   *tls.Conn
+	regResult  chan RegMsg
 }
 
 type serverListen struct {
@@ -484,7 +485,6 @@ func (c *Conn) handlerNodeRead() {
 		_, err = io.ReadFull(c.nodeConn, buf)
 		b := aes.AesCtrDecrypt(buf)
 		msg := common.UnmarshalMsg(b)
-
 		if msg.To == common.NoneUUID.String() && c.node == nil {
 			c.inChan <- func() {
 				newNode := &node{
@@ -493,81 +493,75 @@ func (c *Conn) handlerNodeRead() {
 				newNode.do(msg)
 			}
 		} else if msg.To == currentNode.uuid {
-
-			func() {
-				l := clientLock.RLock()
-				v, ok := nodeMap[msg.From]
-				l.RUnlock()
-				if ok && v.port != 0 {
-					c.inChan <- func() {
-						v.do(msg)
+			v, ok := nodeMap.Load(msg.From)
+			if ok && v.(*node).port != 0 {
+				c.inChan <- func() {
+					v.(*node).do(msg)
+				}
+			} else {
+				if !ok {
+					newNode := &node{
+						uuid:    msg.From,
+						conn:    c,
+						waitMsg: []*common.Msg{msg},
 					}
-				} else {
-					l := clientLock.Lock()
-					v, ok := nodeMap[msg.From]
-					if !ok {
-						newNode := &node{
-							uuid:    msg.From,
-							conn:    c,
-							waitMsg: []*common.Msg{msg},
-						}
-						result := make(chan interface{}, 1)
-						id := newNode.storeQuery(result)
-
-						nodeMap[msg.From] = newNode
-						l.Unlock()
-						newNode.Write(common.CMD_GET_CURRENT_NODE, id, []byte{1}) //获取丢失节点的信息
-						go func() {
-							defer newNode.deleteQuery(id)
-							select {
-							case res := <-result:
-								if res == nil {
-
-									for _, m := range newNode.waitMsg {
-										c.inChan <- func() {
-											newNode.do(m)
-										}
+					result := make(chan interface{}, 1)
+					id := newNode.storeQuery(result)
+					nodeMap.Store(msg.From, newNode)
+					newNode.Write(common.CMD_GET_CURRENT_NODE, id, []byte{1}) //获取丢失节点的信息
+					go func() {
+						defer func() {
+							if err := recover(); err != nil {
+								fmt.Println(err)
+								debug.PrintStack()
+							}
+							newNode.deleteQuery(id)
+						}()
+						select {
+						case res := <-result:
+							if res == nil {
+								for _, m := range newNode.waitMsg {
+									c.inChan <- func() {
+										newNode.do(m)
 									}
 								}
-							case <-time.After(common.CMD_TIMEOUT):
-								newNode.Close("超时")
 							}
-						}()
+						case <-time.After(common.CMD_TIMEOUT):
+							newNode.Close("超时")
+						}
+					}()
 
-					} else {
-
-						if msg.CmdOpteion == common.CMD_GET_CURRENT_NODE_RESULT {
-
-							var res chan interface{}
-							if _v, ok := v.loadQuery(msg.CmdId); !ok {
-								return
-							} else {
-								res = _v
-							}
-
-							var nmsg nodeInfo
-							err = json.Unmarshal(msg.CmdData, &nmsg)
-							if err != nil {
-								res <- err
-								return
-							}
-							v.hostName = cert.RSADecrypterStr(nmsg.HostName)
-							v.uuid = cert.RSADecrypterStr(nmsg.UUID)
-							if v.port, err = strconv.Atoi(cert.RSADecrypterStr(nmsg.Port)); err != nil {
-								v.port = -1
-							}
-							v.mainIp = cert.RSADecrypterStr(nmsg.MainIp)
-							v.goos = cert.RSADecrypterStr(nmsg.Goos)
-							res <- nil
+				} else {
+					if msg.CmdOpteion == common.CMD_GET_CURRENT_NODE_RESULT {
+						n := v.(*node)
+						var res chan interface{}
+						if _v, ok := n.loadQuery(msg.CmdId); !ok {
+							return
 						} else {
-							v.waitMsg = append(v.waitMsg, msg)
+							res = _v
 						}
 
-						l.Unlock()
+						var nmsg nodeInfo
+						err = json.Unmarshal(msg.CmdData, &nmsg)
+						if err != nil {
+							res <- err
+							return
+						}
+						n.hostName = cert.RSADecrypterStr(nmsg.HostName)
+						n.uuid = cert.RSADecrypterStr(nmsg.UUID)
+						if n.port, err = strconv.Atoi(cert.RSADecrypterStr(nmsg.Port)); err != nil {
+							n.port = -1
+						}
+						n.mainIp = cert.RSADecrypterStr(nmsg.MainIp)
+						n.goos = cert.RSADecrypterStr(nmsg.Goos)
+						res <- nil
+					} else {
+						v.(*node).waitMsg = append(v.(*node).waitMsg, msg)
 					}
 
 				}
-			}()
+
+			}
 
 		} else {
 
@@ -605,7 +599,6 @@ func (c *Conn) handlerNodeRead() {
 func (c *Conn) handle() {
 	c.OutChan = make(chan []byte, 64)
 	c.inChan = make(chan func())
-
 	c.close = make(chan string, 999)
 
 	go func() {
@@ -631,34 +624,27 @@ func (c *Conn) handle() {
 					c.node.ping(0)
 					c.node.nextPingTime = time.Now().Unix() + 5
 				}
-				func() { //返回false则退出handle
-					connMap.Delete(c.remoteAddr)
-					l := clientLock.Lock()
-					defer func() {
-						l.Unlock()
-					}()
+				connMap.Delete(c.remoteAddr)
 
-					if atomic.CompareAndSwapInt32(&c.closeTag, 0, 1) {
+				if atomic.CompareAndSwapInt32(&c.closeTag, 0, 1) {
 
-						if c.nodeConn != nil {
-							c.nodeConn.Close()
-						}
-
-						if c.node != nil {
-							c.node.Close(reason)
-							//移除上游连接
-							for i := len(upLevelNode) - 1; i >= 0; i-- {
-								n := upLevelNode[i]
-								if n.uuid == c.node.uuid {
-									upLevelNode = append(upLevelNode[:i], upLevelNode[i+1:]...)
-								}
-							}
-						}
-
+					if c.nodeConn != nil {
+						c.nodeConn.Close()
 					}
 
-					return
-				}()
+					if c.node != nil {
+						c.node.Close(reason)
+						//移除上游连接
+						for i := len(upLevelNode) - 1; i >= 0; i-- {
+							n := upLevelNode[i]
+							if n.uuid == c.node.uuid {
+								upLevelNode = append(upLevelNode[:i], upLevelNode[i+1:]...)
+							}
+						}
+					}
+
+				}
+
 				return
 			}
 		}
@@ -682,6 +668,7 @@ func (c *Conn) reg() error {
 		CmdOpteion: common.CMD_REG,
 		CmdData:    regb,
 	}
+
 	if err = c.tlsWrite(msg.Marshal()); err != nil {
 		return err
 	}
@@ -689,12 +676,8 @@ func (c *Conn) reg() error {
 	return nil
 }
 func (c *Conn) WriteToUUID(msg *common.Msg) {
-
-	l := clientLock.RLock()
-	defer l.RUnlock()
-
-	if n, ok := nodeMap[msg.To]; ok {
-		n.WriteMsg(msg)
+	if n, ok := nodeMap.Load(msg.To); ok {
+		n.(*node).WriteMsg(msg)
 	}
 }
 

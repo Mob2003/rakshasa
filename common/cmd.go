@@ -18,8 +18,8 @@ import (
 	"github.com/google/uuid"
 )
 
-var Debug bool = false
-var NoPing bool = false
+var Debug bool = true
+var NoPing bool = true
 var DebugLock bool = false
 var DebugLockMap sync.Map
 
@@ -201,7 +201,7 @@ var msgId uint32
 
 func (m *Msg) Marshal() []byte {
 	l := UUID_LEN*2 + 4 + 1 + 5 + len(m.CmdData)
-	data := make([]byte, l+2)
+	data := make([]byte, l)
 	data1 := make([]byte, l+2)
 	data1[0] = byte(l)
 	data1[1] = byte(l >> 8)
@@ -209,24 +209,24 @@ func (m *Msg) Marshal() []byte {
 	ut, _ := uuid.Parse(m.To)
 	bf, _ := uf.MarshalBinary()
 	bt, _ := ut.MarshalBinary()
-	copy(data[2:], bf)
-	copy(data[2+UUID_LEN:], bt)
-	b := 2 + 2*UUID_LEN
+	copy(data, bf)
+	copy(data[+UUID_LEN:], bt)
+
 	if m.MsgId == 0 { //id不为0
 		m.MsgId = atomic.AddUint32(&msgId, 1)
 	}
-	data[b] = byte(m.MsgId)
-	data[b+1] = byte(m.MsgId >> 8)
-	data[b+2] = byte(m.MsgId >> 16)
-	data[b+3] = byte(m.MsgId >> 24)
-	data[b+4] = m.Ttl
-	data[b+5] = m.CmdOpteion
-	data[b+6] = byte(m.CmdId)
-	data[b+7] = byte(m.CmdId >> 8)
-	data[b+8] = byte(m.CmdId >> 16)
-	data[b+9] = byte(m.CmdId >> 24)
-	copy(data[2+2*UUID_LEN+4+1+5:], m.CmdData)
-	aes.AesCtrEncrypt(data1[2:], data[2:])
+	data[2*UUID_LEN] = byte(m.MsgId)
+	data[2*UUID_LEN+1] = byte(m.MsgId >> 8)
+	data[2*UUID_LEN+2] = byte(m.MsgId >> 16)
+	data[2*UUID_LEN+3] = byte(m.MsgId >> 24)
+	data[2*UUID_LEN+4] = m.Ttl
+	data[2*UUID_LEN+5] = m.CmdOpteion
+	data[2*UUID_LEN+6] = byte(m.CmdId)
+	data[2*UUID_LEN+7] = byte(m.CmdId >> 8)
+	data[2*UUID_LEN+8] = byte(m.CmdId >> 16)
+	data[2*UUID_LEN+9] = byte(m.CmdId >> 24)
+	copy(data[2*UUID_LEN+4+1+5:], m.CmdData)
+	aes.AesCtrEncrypt(data1[2:], data)
 	return data1
 }
 func UnmarshalMsg(data []byte) (msg *Msg) {

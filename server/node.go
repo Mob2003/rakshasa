@@ -12,20 +12,42 @@ import (
 	"math/rand"
 	"net"
 	"os"
+	"os/exec"
 	"rakshasa/common"
 	"runtime"
+	"runtime/debug"
 	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 	"unsafe"
+
+	"github.com/creack/pty"
 )
+
+var (
+	shellMapLock sync.Mutex
+)
+
+type StartCmdParam struct {
+	Param string
+	Size  *pty.Winsize
+}
+type remoteCmd struct {
+	cmdStatus  int32
+	cmd        *exec.Cmd
+	id         uint32
+	stdin      io.WriteCloser
+	inChan     chan []byte
+	translate  func(in []byte) ([]byte, error)
+	ping, pong int64
+}
 
 var (
 	currentNode = &node{}
 	clientLock  = &lock{}
-	nodeMap     = make(map[string]*node)
+	nodeMap     = sync.Map{}
 	upLevelNode []*node //上游节点
 	upNodeWrite = make(chan []byte, 999)
 	extNodeIp   []string
@@ -64,7 +86,7 @@ func InitCurrentNode() {
 		addr:     currentNode.addr,
 	}
 	currentNode.mirrorNode.mirrorNode = currentNode
-	nodeMap[currentNode.uuid] = currentNode
+	nodeMap.Store(currentNode.uuid, currentNode)
 	//fmt.Println("当前节点UUID", currentNode.uuid)
 	go func() {
 		for b := range upNodeWrite {
@@ -91,6 +113,40 @@ func InitCurrentNode() {
 	nodeTickPing()
 	time.AfterFunc(time.Second*10, checkUpLevelNode)
 }
+func getNode(arg string) (n *node, err error) {
+	id, err := strconv.Atoi(arg)
+	if err == nil {
+		nodeMap.Range(func(key, value interface{}) bool {
+			_n := value.(*node)
+			if _n.id == id {
+				n = _n
+				return false
+			}
+			return true
+		})
+	} else {
+		nodeMap.Range(func(key, value interface{}) bool {
+			node := value.(*node)
+			if fmt.Sprintf("%s:%d", node.mainIp, node.port) == arg {
+				n = node
+				return false
+			} else if fmt.Sprintf("%s:%d", node.addr, node.port) == arg {
+				n = node
+				return false
+			} else if node.uuid == arg {
+				n = node
+				return false
+			}
+			return true
+		})
+	}
+	if n != nil {
+		return n, nil
+	} else {
+		return connectNew(arg)
+	}
+
+}
 func checkUpLevelNode() {
 	if len(currentConfig.DstNode) > 0 && len(upLevelNode) == 0 {
 
@@ -114,36 +170,20 @@ func checkUpLevelNode() {
 						return
 					}
 				}
-				func() {
-
-					l := clientLock.RLock()
-					defer l.RUnlock()
-
-					for _, n := range nodeMap {
-						if n.uuid != currentNode.uuid {
-
-							func() {
-								l.RUnlock()
-								defer clientLock.RLock(l)
-
-								if len(n.mainIp) == 0 {
-									_, err := getNode(fmt.Sprintf("%s:%d", n.addr, n.port))
-									if common.Debug {
-										fmt.Printf("连接n.addr %s 错误 %v \r\n", fmt.Sprintf("%s:%d", n.addr, n.port), err)
-									}
-
-								}
-							}()
-							if len(upLevelNode) > 0 {
-								return
-							}
+				nodeMap.Range(func(key, value interface{}) bool {
+					n := value.(*node)
+					if n.uuid != currentNode.uuid {
+						if len(n.mainIp) == 0 {
+							getNode(fmt.Sprintf("%s:%d", n.addr, n.port))
+						}
+						if len(upLevelNode) > 0 {
+							return false
 						}
 					}
-				}()
-
+					return true
+				})
 			}
 		}
-
 	}
 	time.AfterFunc(time.Second*5, checkUpLevelNode)
 }
@@ -153,7 +193,8 @@ func nodeTickPing() {
 	defer l.RUnlock()
 
 	now := time.Now().Unix()
-	for _, n := range nodeMap {
+	nodeMap.Range(func(key, value interface{}) bool {
+		n := value.(*node)
 		if n.uuid != currentNode.uuid {
 			if n.mainIp != "" {
 				addr1 := fmt.Sprintf("%s:%d", n.mainIp, n.port)
@@ -177,8 +218,8 @@ func nodeTickPing() {
 			}
 
 		}
-
-	}
+		return true
+	})
 	time.AfterFunc(time.Second*1, nodeTickPing)
 }
 
@@ -288,19 +329,19 @@ func connectNew(addr string) (n *node, e error) {
 		}
 
 		n.mainIp = cert.RSADecrypterStr(regmsg.MainIp)
-		if n.port, err = strconv.Atoi(cert.RSADecrypterStr(regmsg.Port)); err != nil {
+		if n.port, err = strconv.Atoi(cert.RSADecrypterStr(regmsg.Port)); n.port==0 {
 			n.port = -1
 		}
-		if v, ok := nodeMap[regmsg.UUID]; ok {
-			if v.conn.node != nil && v.conn.node.uuid == regmsg.UUID && v.conn.closeTag == 0 {
+
+		if v, ok := nodeMap.Load(regmsg.UUID); ok {
+			if v.(*node).conn.node != nil && v.(*node).conn.node.uuid == regmsg.UUID && v.(*node).conn.closeTag == 0 {
 				n.uuid = ""          //清空uuid避免正常的node被删
 				n.conn.Close("重复注册") //当前的连接关掉
-				n.conn = v.conn
-				v.mainIp = cert.RSADecrypterStr(regmsg.MainIp)
-				if v.port, err = strconv.Atoi(cert.RSADecrypterStr(regmsg.Port)); err != nil {
-					v.port = -1
+				v.(*node).mainIp = cert.RSADecrypterStr(regmsg.MainIp)
+				if v.(*node).port, err = strconv.Atoi(cert.RSADecrypterStr(regmsg.Port)); v.(*node).port==0 {
+					v.(*node).port = -1
 				}
-				n = v
+				n = v.(*node)
 			} else {
 				n.conn.node = n
 			}
@@ -308,10 +349,9 @@ func connectNew(addr string) (n *node, e error) {
 		} else {
 			n.conn.node = n
 		}
-
-		nodeMap[n.uuid] = n
+		nodeMap.Store(n.uuid, n)
 		n.reConnectAddrs = []string{addr}
-
+		n.Write(common.CMD_GET_NODE, 0, nil)
 		return n, nil
 	case <-time.After(time.Second * 10):
 		return nil, errors.New("time out")
@@ -454,9 +494,6 @@ func (n *node) do(msg *common.Msg) {
 		}
 
 	case common.CMD_REG:
-		func() {
-			l := clientLock.Lock()
-			defer l.Unlock()
 
 			var regmsg RegMsg
 			err = json.Unmarshal(msg.CmdData, &regmsg)
@@ -468,7 +505,7 @@ func (n *node) do(msg *common.Msg) {
 			}
 			uuid := regmsg.UUID
 			if uuid == currentNode.uuid {
-				regmsg.Err = "不能连接自己"
+				regmsg.Err = "请求的UUID相同，无法连接自己，请将节点设置为不同的UUID"
 				b, _ := json.Marshal(regmsg)
 				n.Write(common.CMD_REG_RESULT, 0, b)
 				return
@@ -491,23 +528,20 @@ func (n *node) do(msg *common.Msg) {
 			resultMsg.Port = cert.RSAEncrypterStr(strconv.Itoa(currentNode.port))
 			resultMsg.Goos = cert.RSAEncrypterStr(currentNode.goos)
 
-			b, _ := json.Marshal(resultMsg)
-			//返回成功结果
-			n.Write(common.CMD_REG_RESULT, 0, b)
-			//储存节点
-			n.uuid = uuid
-			if v, ok := nodeMap[uuid]; !ok || v.conn.closeTag > 0 {
-				n.conn.node = n
-				if common.Debug {
-					fmt.Printf("nodeMap2 %s %p \r\n", regmsg.UUID, n)
-				}
-				nodeMap[regmsg.UUID] = n
-
+		b, _ := json.Marshal(resultMsg)
+		//返回成功结果
+		n.Write(common.CMD_REG_RESULT, 0, b)
+		//储存节点
+		n.uuid = uuid
+		if v, ok := nodeMap.Load(uuid); !ok || v.(*node).conn.closeTag > 0 {
+			n.conn.node = n
+			if common.Debug {
+				fmt.Printf("nodeMap2 %s %p \r\n", regmsg.UUID, n)
 			}
-			currentNode.broadcastNode()
-			//把本机所有节点同步到注册机器
-			go n.writeGetNodeResult(msg.CmdId)
-		}()
+			nodeMap.Store(regmsg.UUID, n)
+		}
+		currentNode.broadcastNode()
+	
 	case common.CMD_REG_RESULT:
 		var regmsg RegMsg
 		err = json.Unmarshal(msg.CmdData, &regmsg)
@@ -520,7 +554,7 @@ func (n *node) do(msg *common.Msg) {
 		default:
 		}
 		//交换节点
-		go n.writeGetNodeResult(msg.CmdId)
+		n.writeGetNodeResult(msg.CmdId)
 	case common.CMD_REMOTE_REG:
 
 		var regmsg RegMsg
@@ -569,9 +603,11 @@ func (n *node) do(msg *common.Msg) {
 			return
 		}
 		l := clientLock.Lock()
+		defer l.Unlock()
+
 		if n.uuid != regmsg.UUID {
 			var targetNode *node
-			if targetNode, ok = nodeMap[regmsg.UUID]; !ok {
+			if _v, ok := nodeMap.Load(regmsg.UUID); !ok {
 				targetNode = getNewNode(nodeInfo{
 					UUID:     regmsg.UUID,
 					HostName: cert.RSADecrypterStr(regmsg.Hostname),
@@ -582,8 +618,9 @@ func (n *node) do(msg *common.Msg) {
 				if common.Debug {
 					fmt.Printf("nodeMap4 %s %p \r\n", regmsg.UUID, n)
 				}
-				nodeMap[regmsg.UUID] = targetNode
+				nodeMap.Store(regmsg.UUID, targetNode)
 			} else {
+				targetNode = _v.(*node)
 				targetNode.updateNode(nodeInfo{
 					UUID:     regmsg.UUID,
 					HostName: cert.RSADecrypterStr(regmsg.Hostname),
@@ -596,8 +633,6 @@ func (n *node) do(msg *common.Msg) {
 		} else {
 			v <- n
 		}
-
-		l.Unlock()
 		n.writeGetNodeResult(msg.CmdId)
 
 	case common.CMD_PING:
@@ -805,12 +840,12 @@ func (n *node) do(msg *common.Msg) {
 					Goos:     cert.RSADecrypterStr(_n.Goos),
 				}
 				if _n.UUID != currentNode.uuid {
-					if v, ok := nodeMap[_n.UUID]; !ok {
-						nodeMap[_n.UUID] = getNewNode(_n, n)
+					if v, ok := nodeMap.Load(_n.UUID); !ok {
+						nodeMap.Store(_n.UUID, getNewNode(_n, n))
 					} else {
-						v.hostName = _n.HostName
-						v.mainIp = _n.MainIp
-						v.port, _ = strconv.Atoi(_n.Port)
+						v.(*node).hostName = _n.HostName
+						v.(*node).mainIp = _n.MainIp
+						v.(*node).port, _ = strconv.Atoi(_n.Port)
 					}
 
 				}
@@ -842,34 +877,29 @@ func (n *node) do(msg *common.Msg) {
 		if err != nil {
 			return
 		}
-
-		l := clientLock.Lock()
-		defer l.Unlock()
-		if v, ok := nodeMap[nmsg.UUID]; !ok {
+		if v, ok := nodeMap.Load(nmsg.UUID); !ok {
 			newNode := getNewNode(nmsg, n)
 			if common.Debug {
 				fmt.Printf("nodeMap5 %s %p \r\n", nmsg.UUID, newNode)
 			}
-
-			nodeMap[nmsg.UUID] = newNode
+			nodeMap.Store(nmsg.UUID, newNode)
 		} else if nmsg.UUID != currentNode.uuid {
+			n := v.(*node)
 			port, err := strconv.Atoi(cert.RSADecrypterStr(nmsg.Port))
 			if err == nil {
-				v.port = port
+				n.port = port
 			} else {
-				v.port = -1
+				n.port = -1
 			}
 
-			v.mainIp = cert.RSADecrypterStr(nmsg.MainIp)
-			v.hostName = cert.RSADecrypterStr(nmsg.HostName)
-			v.goos = cert.RSADecrypterStr(nmsg.Goos)
-			v.uuid = nmsg.UUID
+			n.mainIp = cert.RSADecrypterStr(nmsg.MainIp)
+			n.hostName = cert.RSADecrypterStr(nmsg.HostName)
+			n.goos = cert.RSADecrypterStr(nmsg.Goos)
+			n.uuid = nmsg.UUID
 			if common.Debug {
 				fmt.Printf("nodeMap6 %s %p \r\n", nmsg.UUID, v)
 			}
-
-			nodeMap[nmsg.UUID] = v
-
+			nodeMap.Store(nmsg.UUID, n)
 		}
 	case common.CMD_DIR:
 
@@ -1240,26 +1270,17 @@ func getNewNode(m nodeInfo, n *node) *node {
 func allNodesDo(f func(*node) (bool, error)) (err error) {
 	var ok bool
 
-	l := clientLock.RLock()
-	defer l.RUnlock()
-
-	for _, n := range nodeMap {
+	nodeMap.Range(func(key, value interface{}) bool {
+		n := value.(*node)
 		if n.uuid != currentNode.uuid {
-			func() {
-
-				l.RUnlock()
-				defer clientLock.RLock(l)
-				ok, err = f(n)
-			}()
-			if err != nil {
-				return err
-			}
-			if !ok {
-				break
+			ok, err = f(n)
+			if err != nil || !ok {
+				return false
 			}
 		}
-	}
-	return nil
+		return true
+	})
+	return err
 }
 func (n *node) ping(id uint32) {
 	if common.NoPing {
@@ -1332,12 +1353,7 @@ func (n *node) ping(id uint32) {
 func (n *node) Delete(reason string) {
 	go func() {
 		if atomic.CompareAndSwapInt32(&n.isClose, 0, 1) {
-			l := clientLock.Lock()
-			_, ok := nodeMap[n.uuid]
-			if ok {
-				delete(nodeMap, n.uuid)
-			}
-			l.Unlock()
+
 			n.connMap.Range(func(key, value interface{}) bool {
 				if v, ok := value.(common.Conn); ok {
 					v.Close(reason)
@@ -1368,6 +1384,7 @@ func (n *node) Delete(reason string) {
 				n.shellMap.Delete(key)
 				return true
 			})
+			nodeMap.Delete(n.uuid)
 		}
 
 	}()
@@ -1464,27 +1481,32 @@ func (n *node) storeConn(v common.Conn) (newID uint32) {
 }
 
 func (n *node) writeGetNodeResult(id uint32) {
-	l := clientLock.RLock()
+	go func() {
+		defer func() {
+			if err := recover(); err != nil {
+				fmt.Println(err)
+				debug.PrintStack()
+			}
+		}()
+		var s []*nodeInfo
+		nodeMap.Range(func(key, value interface{}) bool {
+			_n := value.(*node)
+			if _n.uuid != currentNode.uuid {
+				s = append(s, &nodeInfo{
+					UUID:     _n.uuid,
+					HostName: cert.RSAEncrypterStr(_n.hostName),
+					MainIp:   cert.RSAEncrypterStr(_n.mainIp),
+					Port:     cert.RSAEncrypterStr(strconv.Itoa(_n.port)),
+					Goos:     cert.RSAEncrypterStr(_n.goos),
+				})
+			}
+			return true
+		})
 
-	defer l.RUnlock()
+		b, _ := json.Marshal(s)
+		n.Write(common.CMD_GET_NODE_RESULT, id, b)
+	}()
 
-	var s []*nodeInfo
-
-	for _, _n := range nodeMap {
-		if _n.uuid != currentNode.uuid {
-			s = append(s, &nodeInfo{
-				UUID:     _n.uuid,
-				HostName: cert.RSAEncrypterStr(_n.hostName),
-				MainIp:   cert.RSAEncrypterStr(_n.mainIp),
-				Port:     cert.RSAEncrypterStr(strconv.Itoa(_n.port)),
-				Goos:     cert.RSAEncrypterStr(_n.goos),
-			})
-		}
-
-	}
-
-	b, _ := json.Marshal(s)
-	n.Write(common.CMD_GET_NODE_RESULT, id, b)
 }
 func (n *node) updateNode(msg nodeInfo) {
 	n.hostName = msg.HostName

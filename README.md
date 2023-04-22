@@ -12,9 +12,12 @@ rakshasa是一个使用Go语言编写的强大多级代理工具，专为实现*
 - 控制节点，全功能节点
 
 ## 项目结构示例和截图
+
 [点击查看更多介绍](./readme/rakshasa项目设计.md)
 
 [win10+Proxifier实现内网穿透](./readme/rakshasa内网穿透--win10+Proxifier使用案例.md)
+
+[rakshasa主被控设计说明](./readme/rakshasa主被控设计说明.md)
 
 ## 版本迭代
 -  **v0.1.0**  2023-03-28
